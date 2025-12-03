@@ -1,24 +1,4 @@
-"""
-DBSI-Optimized: High-Performance Diffusion Basis Spectrum Imaging
-==================================================================
-
-Fast, robust, and scientifically validated DBSI implementation.
-
-Quick Start
------------
->>> from dbsi_optimized import DBSI_FastModel
->>> model = DBSI_FastModel()
->>> results = model.fit(dwi, bvals, bvecs, mask)
->>> results.save('output/')
-
-Main Components
----------------
-- DBSI_FastModel: Main model class for fitting
-- DBSIResult: Single voxel result container
-- DBSIVolumeResult: Full volume result container
-- estimate_snr_robust: SNR estimation utilities
-- load_dwi_data: Data loading utilities
-"""
+# dbsi_optimized/__init__.py
 
 __version__ = "1.0.0"
 __author__ = "Francesco Guarnaccia"
@@ -26,6 +6,9 @@ __author__ = "Francesco Guarnaccia"
 from .models.fast_dbsi import DBSI_FastModel, DBSIResult, DBSIVolumeResult
 from .core.snr_estimation import estimate_snr_robust
 from .preprocessing.loader import load_dwi_data
+# Aggiungi questi import:
+from .calibration.optimization import run_hyperparameter_optimization
+from .visualization import plot_design_matrix
 
 __all__ = [
     'DBSI_FastModel',
@@ -33,5 +16,7 @@ __all__ = [
     'DBSIVolumeResult',
     'estimate_snr_robust',
     'load_dwi_data',
+    'run_hyperparameter_optimization',
+    'plot_design_matrix', # Esportata
     '__version__',
 ]

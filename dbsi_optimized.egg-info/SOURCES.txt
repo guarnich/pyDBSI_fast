@@ -3,6 +3,7 @@ pyproject.toml
 setup.py
 dbsi_optimized/__init__.py
 dbsi_optimized/cli.py
+dbsi_optimized/visulization.py
 dbsi_optimized.egg-info/PKG-INFO
 dbsi_optimized.egg-info/SOURCES.txt
 dbsi_optimized.egg-info/dependency_links.txt
@@ -19,4 +20,3 @@ dbsi_optimized/models/__init__.py
 dbsi_optimized/models/fast_dbsi.py
 dbsi_optimized/preprocessing/__init__.py
 dbsi_optimized/preprocessing/loader.py
-tests/test_basic.py
