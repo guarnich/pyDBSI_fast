@@ -11,6 +11,13 @@ from numba import jit, prange
 from typing import Tuple
 import warnings
 
+def build_gramian(self, A: np.ndarray) -> np.ndarray:
+        """
+        Calcola A.T @ A ottimizzato.
+        Da chiamare una volta per blocco di dati se i gradienti sono fissi.
+        """
+        return A.T @ A
+
 
 @jit(nopython=True, cache=True, fastmath=True)
 def compute_fiber_signal_numba(bvals, bvecs, fiber_dir, D_ax, D_rad):
