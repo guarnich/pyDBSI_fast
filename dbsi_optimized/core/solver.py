@@ -2,15 +2,18 @@ import numpy as np
 from numba import jit, float64
 
 @jit(nopython=True, cache=True, fastmath=True, nogil=True)
-def fast_nnls_coordinate_descent(AtA, Aty, lambda_reg, tol=1e-6, max_iter=2000):
+def fast_nnls_coordinate_descent(AtA, Aty, lambda_reg_vec, tol=1e-6, max_iter=2000):
     """
-    Ultra-optimized NNLS solver using Gradient Caching.
+    Ultra-optimized NNLS solver with Gradient Caching and Vector Regularization.
     
-    Exploits the sparsity of the DBSI solution: instead of recalculating the full 
-    dot product at each step (slow), it incrementally updates the gradient only 
-    when a variable changes value.
+    Supports 'Split Regularization': each basis function can have a different 
+    regularization penalty (lambda).
     
-    Minimizes: 0.5 * x.T (AtA + lambda*I) x - Aty.T x
+    Args:
+        AtA: Gramian Matrix (N_bases, N_bases)
+        Aty: Product A.T * y (N_bases,)
+        lambda_reg_vec: VECTOR of penalties (N_bases,). 
+                        Allows penalizing fibers and isotropic spectrum differently.
     """
     n_features = AtA.shape[0]
     x = np.zeros(n_features, dtype=np.float64)
@@ -19,31 +22,27 @@ def fast_nnls_coordinate_descent(AtA, Aty, lambda_reg, tol=1e-6, max_iter=2000):
     # Since x=0 initially, the gradient is simply -Aty
     grad = -Aty.astype(np.float64) 
     
-    # Pre-calculate the Hessian diagonal (AtA + lambda)
-    # Needed for the Newton step: step = -grad / hessian
-    hessian_diag = np.diag(AtA).copy() + lambda_reg
-    
-    # Scaled tolerance for stability (optional code commented out)
-    # iter_tol = tol * np.max(np.abs(Aty))
-    # if iter_tol < 1e-10: iter_tol = 1e-10
+    # Pre-calculate the Hessian diagonal adding the SPECIFIC lambda for each basis
+    hessian_diag = np.diag(AtA).copy()
+    for k in range(n_features):
+        hessian_diag[k] += lambda_reg_vec[k]
     
     for iteration in range(max_iter):
         max_update = 0.0
         n_changes = 0
         
         for i in range(n_features):
-            # Calculate current gradient for variable x[i]
-            # g_i = (AtA @ x)[i] - Aty[i] + lambda * x[i]
-            # Thanks to caching, we just read the updated value:
-            g_i = grad[i] + lambda_reg * x[i]
+            # Calculate current gradient using specific lambda
+            # g_i = grad[i] + lambda_reg_vec[i] * x[i]
+            g_i = grad[i] + lambda_reg_vec[i] * x[i]
             
-            # Calculate optimal projected step 
-            # x_new = x[i] - g_i / H_ii
+            # Projected Newton Step
             if hessian_diag[i] > 1e-12:
                 x_new = x[i] - g_i / hessian_diag[i]
             else:
                 x_new = x[i]
             
+            # Projection (Non-Negative constraint)
             if x_new < 0.0:
                 x_new = 0.0
             
@@ -55,12 +54,8 @@ def fast_nnls_coordinate_descent(AtA, Aty, lambda_reg, tol=1e-6, max_iter=2000):
                 if np.abs(diff) > max_update:
                     max_update = np.abs(diff)
                 
-                # --- INCREMENTAL UPDATE ---
-                # Update the global gradient vector only for direction i
-                # Cost: O(N) instead of O(N^2) if nothing changes
-                # grad_new = grad_old + AtA[:, i] * diff
-                
-                # Explicit loop for Numba to avoid temporary array allocations
+                # --- INCREMENTAL UPDATE (Gradient Caching) ---
+                # Update global gradient vector only for direction i
                 for k in range(n_features):
                     grad[k] += AtA[k, i] * diff
                 
