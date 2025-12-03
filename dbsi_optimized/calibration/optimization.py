@@ -3,6 +3,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
+import time
+
+# Import del modello veloce
 from ..models.fast_dbsi import DBSI_FastModel
 
 def generate_synthetic_volume(
@@ -14,8 +17,9 @@ def generate_synthetic_volume(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Genera un volume sintetico 1D per simulazione Monte Carlo basata su parametri fisiologici.
+    Restituisce: (data, ground_truth_restricted_fraction)
     """
-    # Parametri di default basati su letteratura (Wang et al. 2011, Cross & Song 2017)
+    # Parametri di default basati su letteratura (Wang et al. 2011)
     if physio_params is None:
         physio_params = {
             'ad_range': (1.2e-3, 1.9e-3),    # Axial Diffusivity (WM sana)
@@ -28,10 +32,10 @@ def generate_synthetic_volume(
         }
 
     n_meas = len(bvals)
+    # Shape compatibile con DBSI_FastModel: (X, Y, Z, N_vol) -> (N_vox, 1, 1, N_vol)
     signals = np.zeros((n_voxels, 1, 1, n_meas), dtype=np.float64)
     gt_restricted = np.zeros(n_voxels)
     
-    # Vettorializzazione parziale per velocità (opzionale, qui ciclo esplicito per chiarezza random)
     for i in range(n_voxels):
         # Sampling Parametri Fisiologici
         d_fiber_ax = np.random.uniform(*physio_params['ad_range'])
@@ -82,68 +86,62 @@ def run_hyperparameter_optimization(
     bvals: np.ndarray,
     bvecs: np.ndarray,
     snr: float,
-    bases_grid: List[int] = [20, 25, 50, 75, 100],
-    lambdas_grid: List[float] = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0],
+    bases_grid: List[int] = [15, 25, 50, 75],
+    lambdas_grid: List[float] = [0.05, 0.1, 0.2, 0.4, 0.8],
     n_monte_carlo: int = 500,
-    plot: bool = True
+    plot: bool = True,
+    seed: int = 42,
 ) -> Dict:
     """
     Esegue una Grid Search Monte Carlo per trovare i parametri ottimali del modello DBSI
     specifici per il protocollo di acquisizione e l'SNR dei dati.
-
-    Parameters
-    ----------
-    bvals : array
-        B-values del protocollo reale.
-    bvecs : array
-        B-vectors del protocollo reale.
-    snr : float
-        SNR stimato dai dati reali (es. usando estimate_snr_robust).
-    bases_grid : list
-        Lista di numeri di basi isotrope da testare.
-    lambdas_grid : list
-        Lista di valori di regolarizzazione da testare.
-    n_monte_carlo : int
-        Numero di voxel sintetici da simulare per ogni configurazione.
-    plot : bool
-        Se True, mostra la heatmap dei risultati.
-
-    Returns
-    -------
-    dict
-        Dizionario con i parametri ottimali ('n_bases', 'lambda', 'mae').
     """
-    print(f"🚀 Avvio Ottimizzazione Iperparametri (SNR: {snr:.1f})...")
+    print(f"\n🚀 Avvio Ottimizzazione Iperparametri (SNR: {snr:.1f})...")
     print(f"   Simulazione di {n_monte_carlo} voxel per {len(bases_grid)*len(lambdas_grid)} configurazioni.")
 
     # 1. Generazione Dataset Sintetico (una volta sola per coerenza)
+    print("   Generazione dataset sintetico...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
-        bvals, bvecs, n_voxels=n_monte_carlo, snr=snr
+        bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
     )
     mask_synth = np.ones((n_monte_carlo, 1, 1), dtype=bool)
+    print("   Generazione dataset sintetico: COMPLETATA.\n")
     
-    # 2. Grid Search
+    # 2. Grid Search con output tabellare
     mae_results = np.zeros((len(bases_grid), len(lambdas_grid)))
+    
+    # Intestazione Tabella
+    print(f"{'Basi Iso':<10} | {'Lambda':<8} | {'MAE (Cell)':<12} | {'Bias':<10} | {'Std Dev':<10}")
+    print("-" * 60)
     
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
             # Inizializza modello veloce
-            # Nota: verbose=False per non intasare l'output
+            # verbose=False per non stampare la progress bar interna di tqdm
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=-1, # Usa parallelismo Numba interno
+                n_jobs=-1, # Usa tutti i core
                 verbose=False
             )
             
             # Fitting
             res = model.fit(synth_data, bvals, bvecs, mask_synth)
             
-            # Valutazione Errore (Focus su Restricted Fraction per infiammazione)
+            # Estrai stime della Restricted Fraction
             est_restricted = res.restricted_fraction.flatten()
-            mae = np.mean(np.abs(est_restricted - gt_restricted))
+            
+            # Calcolo metriche
+            diff = est_restricted - gt_restricted
+            mae = np.mean(np.abs(diff))
+            bias = np.mean(diff)
+            std_dev = np.std(diff)
+            
             mae_results[i, j] = mae
+            
+            # Stampa riga risultati LIVE
+            print(f"{n_bases:<10} | {reg_lambda:<8.2f} | {mae:<12.4f} | {bias:<+10.4f} | {std_dev:<10.4f}")
             
     # 3. Selezione Ottimo
     min_idx = np.unravel_index(np.argmin(mae_results), mae_results.shape)
@@ -160,19 +158,20 @@ def run_hyperparameter_optimization(
         'grid_lambdas': lambdas_grid
     }
 
-    print(f"\n🏆 Configurazione Ottimale Trovata:")
+    print("-" * 60)
+    print(f"🏆 Configurazione Ottimale:")
     print(f"   Basi Isotrope: {best_bases}")
     print(f"   Regolarizzazione (Lambda): {best_lambda}")
-    print(f"   Errore Medio Atteso: {best_mae:.4f}")
+    print(f"   Errore Medio Atteso (MAE): {best_mae:.4f}")
 
-    # 4. Visualizzazione
+    # 4. Visualizzazione Heatmap
     if plot:
         try:
             import seaborn as sns
             plt.figure(figsize=(10, 6))
             ax = sns.heatmap(mae_results, annot=True, fmt=".4f", cmap="viridis_r",
                         xticklabels=lambdas_grid, yticklabels=bases_grid)
-            plt.title(f'DBSI Calibration Landscape\n(SNR={snr:.1f}, Protocol Specific)', fontsize=14)
+            plt.title(f'DBSI Calibration Error (MAE)\nTarget: Restricted Fraction (Inflammation)', fontsize=14)
             plt.xlabel('Regularization Lambda', fontsize=12)
             plt.ylabel('Isotropic Bases Count', fontsize=12)
             
@@ -182,6 +181,6 @@ def run_hyperparameter_optimization(
             
             plt.show()
         except ImportError:
-            print("Installare 'seaborn' per visualizzare la heatmap.")
+            print("Installa 'seaborn' per visualizzare la heatmap.")
 
     return result
