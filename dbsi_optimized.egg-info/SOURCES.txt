@@ -13,6 +13,7 @@ dbsi_optimized/calibration/__init__.py
 dbsi_optimized/core/__init__.py
 dbsi_optimized/core/design_matrix.py
 dbsi_optimized/core/snr_estimation.py
+dbsi_optimized/core/solver.py
 dbsi_optimized/models/__init__.py
 dbsi_optimized/models/fast_dbsi.py
 dbsi_optimized/preprocessing/__init__.py

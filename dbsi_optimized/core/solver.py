@@ -1,7 +1,7 @@
 import numpy as np
 from numba import jit, float64
 
-@jit(float64[:](float64[:, :], float64[:], float64, float64, int64), 
+@jit(float64[:](float64[:, :], float64[:], float64, float64, np.int64), 
      nopython=True, cache=True, fastmath=True, nogil=True)
 def fast_nnls_coordinate_descent(AtA, Aty, lambda_reg, tol=1e-8, max_iter=3000):
     """
