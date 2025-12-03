@@ -38,7 +38,7 @@ This toolbox solves the computational bottlenecks of the original algorithm whil
 ### Installation
 
 ```bash
-git clone [https://github.com/guarnich/pyDBSI_fast.git](https://github.com/guarnich/pyDBSI_fast.git)
+git clone https://github.com/guarnich/pyDBSI_fast.git
 cd pyDBSI_fast
 
 # Create virtual environment (recommended)
@@ -153,6 +153,3 @@ model = DBSI_FastModel(..., th_restricted=0.2e-3, th_hindered=2.5e-3)
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
-
-```
-```

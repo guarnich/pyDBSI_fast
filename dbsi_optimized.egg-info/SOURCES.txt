@@ -2,7 +2,6 @@ README.md
 pyproject.toml
 setup.py
 dbsi_optimized/__init__.py
-dbsi_optimized/cli.py
 dbsi_optimized/visualization.py
 dbsi_optimized.egg-info/PKG-INFO
 dbsi_optimized.egg-info/SOURCES.txt
