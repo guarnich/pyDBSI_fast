@@ -2,5 +2,6 @@
 Calibration utilities for DBSI parameters.
 """
 
-# Placeholder for future calibration tools
-__all__ = []
+from .optimization import run_hyperparameter_optimization
+
+__all__ = ['run_hyperparameter_optimization']
