@@ -1,13 +1,4 @@
 # dbsi_optimized/models/fast_dbsi.py
-"""
-DBSI Fast Model: Advanced Mathematical Implementation
-=====================================================
-Features:
-- Split Regularization (Aniso vs Iso) for better specificity.
-- Weighted Vector Averaging for sub-grid angular precision.
-- Configurable thresholds for scientific robustness.
-"""
-
 import numpy as np
 import nibabel as nib
 import os
@@ -20,11 +11,7 @@ from typing import Tuple
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
-# --- Constants ---
-TH_RESTRICTED = 0.3e-3  # Threshold for restricted diffusion
-TH_HINDERED = 2.0e-3    # Threshold for hindered diffusion (can be overridden)
-
-# --- Legacy Container (Re-added for API compatibility) ---
+# --- Legacy Container ---
 @dataclass
 class DBSIResult:
     """Legacy container for single-voxel DBSI results."""
@@ -38,9 +25,7 @@ class DBSIResult:
     r_squared: float
     converged: bool
 
-# --- Volumetric Container ---
 class DBSIVolumeResult:
-    """Container for volumetric DBSI results."""
     def __init__(self, X: int, Y: int, Z: int):
         self.shape = (X, Y, Z)
         # Fractions
@@ -53,7 +38,7 @@ class DBSIVolumeResult:
         self.radial_diffusivity = np.zeros((X, Y, Z), dtype=np.float32)
         # Quality
         self.r_squared = np.zeros((X, Y, Z), dtype=np.float32)
-        # Fiber Direction (Weighted Average)
+        # Fiber Direction
         self.fiber_dir_x = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_y = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_z = np.zeros((X, Y, Z), dtype=np.float32)
@@ -89,13 +74,9 @@ class DBSIVolumeResult:
             'pct_converged': float(np.mean(self.r_squared[mask] > 0.5) * 100)
         }
 
-# --- Parallel Kernel ---
 @njit(parallel=True, fastmath=True, cache=True)
 def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lambda_vec, 
                     th_restricted, th_hindered, out_results):
-    """
-    Parallel Kernel with Split Regularization and Weighted Direction Recovery.
-    """
     N_batch = coords.shape[0]
     N_vol = data.shape[3]
     N_aniso = len(bvecs_basis)
@@ -112,10 +93,8 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
             if bvals[k] < 50.0:
                 s0 += signal[k]
                 cnt += 1
-        
         if cnt > 0: s0 /= cnt
         else: s0 = signal[0] + 1e-10
-        
         if s0 <= 1e-6: continue
         y_norm = signal / s0
         
@@ -127,37 +106,28 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
                 val += At[r, c] * y_norm[c]
             Aty[r] = val
         
-        # 3. Solve NNLS (Using Vector Regularization)
+        # 3. Solve NNLS (Vector Reg)
         w = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
         
         # 4. Parse Results
-        # Anisotropic (Fiber) - Weighted Vector Averaging
         f_fiber = 0.0
-        
-        # Accumulators for weighted direction
-        dir_x = 0.0
-        dir_y = 0.0
-        dir_z = 0.0
-        weight_sum = 0.0
+        dir_x, dir_y, dir_z, weight_sum = 0.0, 0.0, 0.0, 0.0
         
         for k in range(N_aniso):
             val = w[k]
             f_fiber += val
-            
-            # Contribute to direction only if weight is significant
+            # Weighted Vector Averaging
             if val > 1e-5:
                 dir_x += val * bvecs_basis[k, 0]
                 dir_y += val * bvecs_basis[k, 1]
                 dir_z += val * bvecs_basis[k, 2]
                 weight_sum += val
         
-        # Isotropic
         f_res, f_hin, f_wat = 0.0, 0.0, 0.0
         for k in range(N_iso):
             idx = N_aniso + k
             adc = iso_grid[k]
             val = w[idx]
-            # Use dynamic thresholds
             if adc <= th_restricted: f_res += val
             elif adc <= th_hindered: f_hin += val
             else: f_wat += val
@@ -170,7 +140,6 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
             out_results[x, y, z, 2] = f_hin / total
             out_results[x, y, z, 3] = f_wat / total
             
-            # Calculate Interpolated Direction
             if f_fiber > 0.01 and weight_sum > 0:
                 norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
                 if norm > 0:
@@ -178,13 +147,11 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
                     out_results[x, y, z, 6] = dir_y / norm
                     out_results[x, y, z, 7] = dir_z / norm
             
-            # 5. Exact R-Squared
+            # 5. R-Squared
             y_mean = 0.0
             for k in range(N_vol): y_mean += y_norm[k]
             y_mean /= N_vol
-            
-            tss = 0.0
-            y_dot_y = 0.0
+            tss, y_dot_y = 0.0, 0.0
             for k in range(N_vol):
                 diff = y_norm[k] - y_mean
                 tss += diff * diff
@@ -206,12 +173,11 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
                 if r2 > 1: r2 = 1.0
                 out_results[x, y, z, 4] = r2
 
-# --- Main Model Class ---
 class DBSI_FastModel:
     def __init__(self, n_iso_bases=50, reg_lambda=2.0, D_ax=1.5e-3, D_rad=0.3e-3, verbose=True, n_jobs=-1,
                  th_restricted=0.3e-3, 
-                 th_hindered=3.0e-3, 
-                 iso_range: Tuple[float, float] = (0.0, 4.0e-3)):
+                 th_hindered=3.0e-3, # Updated to 3.0e-3
+                 iso_range: Tuple[float, float] = (0.0, 4.0e-3)): # Extended range
         
         self.n_iso_bases = n_iso_bases
         self.reg_lambda = reg_lambda
@@ -219,7 +185,6 @@ class DBSI_FastModel:
         self.D_rad = D_rad
         self.verbose = verbose
         
-        # Thresholds
         self.th_restricted = float(th_restricted)
         self.th_hindered = float(th_hindered)
         self.iso_range = iso_range
@@ -232,7 +197,7 @@ class DBSI_FastModel:
             print(f"Protocol: {len(bvals)} volumes")
             print(f"Thresholds: Restricted < {self.th_restricted*1e3:.2f}, Hindered < {self.th_hindered*1e3:.2f}")
         
-        # 1. Build Design Matrix
+        # 1. Build Design Matrix (Super-Resolution)
         builder = FastDesignMatrixBuilder(
             n_iso_bases=self.n_iso_bases,
             iso_range=self.iso_range, 
@@ -240,8 +205,6 @@ class DBSI_FastModel:
             D_rad=self.D_rad
         )
         A = builder.build(bvals, bvecs)
-        
-        # Export basis directions
         basis_dirs = builder.get_basis_info()['aniso_directions'].astype(np.float64)
         
         # 2. Pre-compute Gramian
@@ -258,7 +221,7 @@ class DBSI_FastModel:
         reg_vec[:N_aniso] = self.reg_lambda * 0.2 
         
         if self.verbose:
-            print(f"Design Matrix: {A.shape}")
+            print(f"Design Matrix: {A.shape} (Aniso: {N_aniso}, Iso: {len(iso_grid)})")
         
         # 3. Batch Processing
         mask_coords = np.argwhere(mask)
@@ -273,15 +236,10 @@ class DBSI_FastModel:
         for i in range(0, n_voxels, batch_size):
             batch_coords = mask_coords[i : i + batch_size]
             fit_batch_numba(
-                dwi.astype(np.float64), 
-                batch_coords,
-                AtA, At, 
-                bvals.astype(np.float64), 
-                iso_grid.astype(np.float64),
-                basis_dirs,     
-                reg_vec,        
-                self.th_restricted,
-                self.th_hindered,
+                dwi.astype(np.float64), batch_coords,
+                AtA, At, bvals.astype(np.float64), iso_grid.astype(np.float64),
+                basis_dirs, reg_vec, 
+                self.th_restricted, self.th_hindered,
                 results_map
             )
             if self.verbose: pbar.update(len(batch_coords))
@@ -301,7 +259,6 @@ class DBSI_FastModel:
         res.fiber_dir_x = results_map[..., 5]
         res.fiber_dir_y = results_map[..., 6]
         res.fiber_dir_z = results_map[..., 7]
-        
         res.axial_diffusivity[mask > 0] = self.D_ax
         res.radial_diffusivity[mask > 0] = self.D_rad
         
