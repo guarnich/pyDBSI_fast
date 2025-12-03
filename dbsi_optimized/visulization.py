@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAS_SEABORN = False
 
-from ..core.design_matrix import FastDesignMatrixBuilder
+from .core.design_matrix import FastDesignMatrixBuilder
 
 def plot_design_matrix(
     bvals: np.ndarray,
@@ -45,6 +45,8 @@ def plot_design_matrix(
     
     # Normalizzazione per visualizzare correlazione (coseno) invece di prodotto scalare puro
     diag = np.sqrt(np.diag(AtA))
+    # Evita divisione per zero
+    diag[diag == 0] = 1.0
     AtA_corr = AtA / np.outer(diag, diag)
     
     # Info dimensioni
@@ -58,10 +60,14 @@ def plot_design_matrix(
     
     # Plot 1: Design Matrix A
     ax1 = fig.add_subplot(gs[0])
+    
+    # Normalizza A per visualizzazione migliore (0-1)
+    A_vis = A / np.max(np.abs(A))
+    
     if HAS_SEABORN:
-        sns.heatmap(A, ax=ax1, cmap="viridis", cbar=False, xticklabels=False, yticklabels=False)
+        sns.heatmap(A_vis, ax=ax1, cmap="viridis", cbar=False, xticklabels=False, yticklabels=False)
     else:
-        ax1.imshow(A, aspect='auto', cmap="viridis")
+        ax1.imshow(A_vis, aspect='auto', cmap="viridis")
         
     ax1.set_title(f"Design Matrix A\n({N_meas} misure x {N_bases} basi)", fontsize=12, fontweight='bold')
     ax1.set_ylabel("Misure DWI (volumi)", fontsize=10)
@@ -69,8 +75,12 @@ def plot_design_matrix(
     
     # Linea divisoria tra Anisotropo e Isotropico
     ax1.axvline(x=N_aniso, color='white', linestyle='--', linewidth=1, alpha=0.7)
-    ax1.text(N_aniso/2, -2, "Aniso (Fibre)", ha='center', color='black', fontsize=9)
-    ax1.text(N_aniso + N_iso/2, -2, "Iso (Spettro)", ha='center', color='black', fontsize=9)
+    
+    # Annotazioni (posizionate sotto l'asse x)
+    # Usiamo trasformazioni per posizionare il testo relativo agli assi
+    trans = ax1.get_xaxis_transform()
+    ax1.text(N_aniso/2, -0.05, "Aniso\n(Fibre)", ha='center', va='top', color='black', fontsize=9, transform=trans)
+    ax1.text(N_aniso + N_iso/2, -0.05, "Iso\n(Spettro)", ha='center', va='top', color='black', fontsize=9, transform=trans)
 
     # Plot 2: Gramian Matrix (Correlations)
     ax2 = fig.add_subplot(gs[1])
@@ -96,6 +106,9 @@ def plot_design_matrix(
     
     print(f"📊 Info Matrice:")
     print(f"   Shape: {A.shape}")
-    print(f"   Condizionamento (Condition Number): {np.linalg.cond(A):.2e}")
-    if np.linalg.cond(A) > 1e4:
+    cond_num = np.linalg.cond(A)
+    print(f"   Condizionamento (Condition Number): {cond_num:.2e}")
+    if cond_num > 1e4:
         print(f"   ⚠️ Attenzione: Matrice mal condizionata! La regolarizzazione è essenziale.")
+    else:
+        print(f"   ✅ Matrice ben condizionata.")
