@@ -1,7 +1,7 @@
 # dbsi_optimized/core/design_matrix.py
 import numpy as np
 from numba import jit, prange
-from typing import Tuple
+from typing import Tuple, List
 
 @jit(nopython=True, cache=True, fastmath=True)
 def compute_fiber_signal_numba(bvals, bvecs_meas, fiber_dir_basis, D_ax, D_rad):
@@ -16,15 +16,34 @@ def compute_fiber_signal_numba(bvals, bvecs_meas, fiber_dir_basis, D_ax, D_rad):
     return signal
 
 @jit(nopython=True, cache=True, fastmath=True, parallel=True)
-def build_anisotropic_basis_numba(bvals, bvecs_meas, basis_dirs, D_ax, D_rad):
+def build_anisotropic_basis_numba(bvals, bvecs_meas, basis_dirs, diff_profiles):
+    """
+    Builds anisotropic matrix part using multiple diffusivity profiles.
+    Returns: (N_meas, N_dirs * N_profiles)
+    """
     N_meas = len(bvals)
-    N_basis = len(basis_dirs)
-    A_aniso = np.empty((N_meas, N_basis), dtype=np.float64)
-    for k in prange(N_basis):
-        fiber_dir = basis_dirs[k]
-        A_aniso[:, k] = compute_fiber_signal_numba(
-            bvals, bvecs_meas, fiber_dir, D_ax, D_rad
+    N_dirs = len(basis_dirs)
+    N_profiles = len(diff_profiles)
+    N_total_aniso = N_dirs * N_profiles
+    
+    A_aniso = np.empty((N_meas, N_total_aniso), dtype=np.float64)
+    
+    # Nested parallel loop structure
+    # We flatten the index for easier parallelization
+    for idx in prange(N_total_aniso):
+        # Decode index -> (profile_idx, dir_idx)
+        profile_idx = idx // N_dirs
+        dir_idx = idx % N_dirs
+        
+        # Get parameters
+        d_ax = diff_profiles[profile_idx, 0]
+        d_rad = diff_profiles[profile_idx, 1]
+        fiber_dir = basis_dirs[dir_idx]
+        
+        A_aniso[:, idx] = compute_fiber_signal_numba(
+            bvals, bvecs_meas, fiber_dir, d_ax, d_rad
         )
+    
     return A_aniso
 
 @jit(nopython=True, cache=True, fastmath=True)
@@ -53,16 +72,23 @@ def generate_fibonacci_sphere(samples=150):
 class FastDesignMatrixBuilder:
     def __init__(self,
                  n_iso_bases: int = 50,
-                 n_aniso_bases: int = 150, # Super-Resolution default
-                 iso_range: Tuple[float, float] = (0.0, 4.0e-3), # CSF coverage
-                 D_ax: float = 1.5e-3,
-                 D_rad: float = 0.3e-3):
+                 n_aniso_bases: int = 150,
+                 iso_range: Tuple[float, float] = (0.0, 4.0e-3),
+                 # UPDATE: Supports list of (AD, RD) tuples
+                 diffusivity_profiles: List[Tuple[float, float]] = None):
         
         self.n_iso_bases = n_iso_bases
         self.n_aniso_bases = n_aniso_bases
-        self.D_ax = D_ax
-        self.D_rad = D_rad
         
+        # Default profiles covering Healthy and Injured axons (Issue 2.1)
+        if diffusivity_profiles is None:
+            self.diff_profiles = np.array([
+                [1.8e-3, 0.3e-3], # Healthy / Fast
+                [1.0e-3, 0.3e-3]  # Injured / Slow
+            ], dtype=np.float64)
+        else:
+            self.diff_profiles = np.array(diffusivity_profiles, dtype=np.float64)
+            
         self.D_iso_grid = np.linspace(iso_range[0], iso_range[1], n_iso_bases)
         self.basis_dirs = generate_fibonacci_sphere(n_aniso_bases)
         self._cached_matrix = None
@@ -74,11 +100,16 @@ class FastDesignMatrixBuilder:
         norms[norms == 0] = 1e-10
         bvecs_norm = np.ascontiguousarray(bvecs / norms, dtype=np.float64)
         
-        cache_key = (tuple(bvals), bvecs_norm.tobytes())
+        # Cache key includes profiles now
+        cache_key = (tuple(bvals), bvecs_norm.tobytes(), self.diff_profiles.tobytes())
         if self._cache_key == cache_key and self._cached_matrix is not None:
             return self._cached_matrix
         
-        A_aniso = build_anisotropic_basis_numba(bvals, bvecs_norm, self.basis_dirs, self.D_ax, self.D_rad)
+        # Build Multi-Diffusivity Anisotropic Basis
+        A_aniso = build_anisotropic_basis_numba(
+            bvals, bvecs_norm, self.basis_dirs, self.diff_profiles
+        )
+        
         A_iso = build_isotropic_basis_numba(bvals, self.D_iso_grid)
         A = np.hstack([A_aniso, A_iso])
         
@@ -90,6 +121,5 @@ class FastDesignMatrixBuilder:
         return {
             'iso_diffusivities': self.D_iso_grid,
             'aniso_directions': self.basis_dirs,
-            'fiber_D_ax': self.D_ax,
-            'fiber_D_rad': self.D_rad,
+            'diffusivity_profiles': self.diff_profiles,
         }

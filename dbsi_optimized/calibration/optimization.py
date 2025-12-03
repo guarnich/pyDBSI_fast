@@ -1,11 +1,17 @@
 # dbsi_optimized/calibration/optimization.py
+"""
+Hyperparameter Optimization Module
+==================================
+Performs Monte Carlo simulations to calibrate DBSI regularization (lambda) 
+and basis count parameters based on protocol-specific SNR and b-values.
+"""
 
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 import time
 
-# Import fast model
+# Import the fast model
 from ..models.fast_dbsi import DBSI_FastModel
 
 def generate_synthetic_volume(
@@ -17,23 +23,38 @@ def generate_synthetic_volume(
     seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generates a 1D synthetic volume for Monte Carlo simulation based on physiological parameters.
-    Returns: (data, ground_truth_restricted_fraction)
+    Generates a 1D synthetic volume for Monte Carlo simulation based on 
+    realistic physiological parameters (Fiber, Restricted, Hindered, Water).
+    
+    Args:
+        bvals: Array of b-values.
+        bvecs: Array of gradient directions.
+        n_voxels: Number of synthetic voxels to generate.
+        snr: Signal-to-Noise Ratio (Rician noise).
+        physio_params: Dictionary of physiological ranges.
+        seed: Random seed for reproducibility.
+        
+    Returns:
+        signals: Synthetic DWI signals (N_voxels, 1, 1, N_meas).
+        gt_restricted: Ground truth restricted fractions (N_voxels,).
     """
-    # Set seed for reproducibility if provided
+    # Set seed for reproducibility
     if seed is not None:
         np.random.seed(seed)
 
-    # Default parameters based on literature (Wang et al. 2011)
+    # Default parameters based on literature (Wang et al. 2011, Cross & Song 2017)
+    # Updated to include Hindered diffusivity
     if physio_params is None:
         physio_params = {
             'ad_range': (1.2e-3, 1.9e-3),    # Axial Diffusivity (Healthy WM)
             'rd_range': (0.2e-3, 0.5e-3),    # Radial Diffusivity
-            'cell_range': (0.0, 0.0003),     # Restricted (Inflammation)
-            'water_range': (2.5e-3, 3.5e-3), # Free Water (CSF/Edema)
-            'f_fiber_mean': 0.5,
-            'f_res_mean': 0.3,               # Pathological scenario (inflammation)
-            'f_water_mean': 0.2
+            'cell_range': (0.0, 0.0003),     # Restricted (Inflammation/Cellularity)
+            'hindered_range': (0.5e-3, 1.5e-3), # Hindered (Edema/Tissue)
+            'water_range': (2.5e-3, 3.5e-3), # Free Water (CSF)
+            'f_fiber_mean': 0.45,
+            'f_res_mean': 0.25,              # Pathological scenario (Inflammation)
+            'f_hin_mean': 0.15,              # Hindered fraction
+            'f_water_mean': 0.15
         }
 
     n_meas = len(bvals)
@@ -46,17 +67,19 @@ def generate_synthetic_volume(
         d_fiber_ax = np.random.uniform(*physio_params['ad_range'])
         d_fiber_rad = np.random.uniform(*physio_params['rd_range'])
         d_cell = np.random.uniform(*physio_params['cell_range'])
+        d_hin = np.random.uniform(*physio_params['hindered_range']) # Hindered
         d_water = np.random.uniform(*physio_params['water_range'])
         
         # Fractions with natural variation
         ff = np.random.normal(physio_params['f_fiber_mean'], 0.05)
         fr = np.random.normal(physio_params['f_res_mean'], 0.05)
+        fh = np.random.normal(physio_params['f_hin_mean'], 0.05)
         fw = np.random.normal(physio_params['f_water_mean'], 0.05)
         
         # Clip and renormalization
-        ff, fr, fw = np.clip([ff, fr, fw], 0, 1)
-        total = ff + fr + fw + 1e-10
-        ff, fr, fw = ff/total, fr/total, fw/total
+        ff, fr, fh, fw = np.clip([ff, fr, fh, fw], 0, 1)
+        total = ff + fr + fh + fw + 1e-10
+        ff, fr, fh, fw = ff/total, fr/total, fh/total, fw/total
         
         gt_restricted[i] = fr
         
@@ -75,11 +98,12 @@ def generate_synthetic_volume(
         
         s_fiber = np.exp(-bvals * d_app)
         s_cell = np.exp(-bvals * d_cell)
+        s_hin = np.exp(-bvals * d_hin) # Hindered signal
         s_water = np.exp(-bvals * d_water)
         
-        sig_noiseless = ff * s_fiber + fr * s_cell + fw * s_water
+        sig_noiseless = ff * s_fiber + fr * s_cell + fh * s_hin + fw * s_water
         
-        # Rician Noise
+        # Rician Noise generation
         sigma = 1.0 / snr
         noise_r = np.random.normal(0, sigma, n_meas)
         noise_i = np.random.normal(0, sigma, n_meas)
@@ -91,21 +115,34 @@ def run_hyperparameter_optimization(
     bvals: np.ndarray,
     bvecs: np.ndarray,
     snr: float,
-    bases_grid: List[int] = [100, 150, 200, 250, 300],
-    lambdas_grid: List[float] = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
-    n_monte_carlo: int = 1000,
+    bases_grid: List[int] = [50, 80, 100, 150, 200], # Updated defaults
+    lambdas_grid: List[float] = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0], # Extended range
+    n_monte_carlo: int = 500,
     seed: int = 42,
     plot: bool = True
 ) -> Dict:
     """
-    Performs a Monte Carlo Grid Search to find optimal DBSI parameters.
-    Optimizes based on MSE and MAE of the Restricted Fraction.
+    Executes a Monte Carlo Grid Search to find optimal DBSI parameters.
+    Optimizes based on MSE and MAE of the Restricted Fraction (Inflammation marker).
+    
+    Args:
+        bvals: Acquisition b-values.
+        bvecs: Acquisition b-vectors.
+        snr: Estimated SNR of the dataset.
+        bases_grid: List of isotropic basis counts to test.
+        lambdas_grid: List of regularization lambdas to test.
+        n_monte_carlo: Number of synthetic voxels per configuration.
+        seed: Random seed for reproducibility.
+        plot: Whether to plot the results heatmap.
+        
+    Returns:
+        Dictionary containing optimal parameters and full grid results.
     """
     print(f"\n🚀 Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
     print(f"   Random seed: {seed} (Reproducible)")
 
-    # 1. Synthetic Dataset Generation
+    # 1. Synthetic Dataset Generation (Once for consistency)
     print("   Generating synthetic dataset...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
         bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
@@ -124,7 +161,7 @@ def run_hyperparameter_optimization(
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
-            # Initialize fast model
+            # Initialize fast model (Quiet mode)
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
@@ -153,8 +190,8 @@ def run_hyperparameter_optimization(
             # Print result row LIVE
             print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f} | {bias:<+8.4f} | {std_dev:<8.4f}")
             
-    # 3. Select Optimal
-    # We choose the combination with lowest MSE (which penalizes larger errors more and balances Bias/Variance)
+    # 3. Select Optimal Configuration
+    # We choose the combination with lowest MSE (Balances Bias and Variance)
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
     best_bases = bases_grid[min_idx[0]]
     best_lambda = lambdas_grid[min_idx[1]]
