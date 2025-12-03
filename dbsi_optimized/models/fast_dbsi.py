@@ -20,6 +20,25 @@ from typing import Tuple
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
+# --- Constants ---
+TH_RESTRICTED = 0.3e-3  # Threshold for restricted diffusion
+TH_HINDERED = 2.0e-3    # Threshold for hindered diffusion (can be overridden)
+
+# --- Legacy Container (Re-added for API compatibility) ---
+@dataclass
+class DBSIResult:
+    """Legacy container for single-voxel DBSI results."""
+    f_fiber: float
+    f_restricted: float
+    f_hindered: float
+    f_water: float
+    fiber_dir: np.ndarray
+    D_axial: float
+    D_radial: float
+    r_squared: float
+    converged: bool
+
+# --- Volumetric Container ---
 class DBSIVolumeResult:
     """Container for volumetric DBSI results."""
     def __init__(self, X: int, Y: int, Z: int):
@@ -70,11 +89,12 @@ class DBSIVolumeResult:
             'pct_converged': float(np.mean(self.r_squared[mask] > 0.5) * 100)
         }
 
+# --- Parallel Kernel ---
 @njit(parallel=True, fastmath=True, cache=True)
 def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lambda_vec, 
                     th_restricted, th_hindered, out_results):
     """
-    Parallel Kernel with Split Regularization and Dynamic Thresholds.
+    Parallel Kernel with Split Regularization and Weighted Direction Recovery.
     """
     N_batch = coords.shape[0]
     N_vol = data.shape[3]
@@ -113,6 +133,8 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
         # 4. Parse Results
         # Anisotropic (Fiber) - Weighted Vector Averaging
         f_fiber = 0.0
+        
+        # Accumulators for weighted direction
         dir_x = 0.0
         dir_y = 0.0
         dir_z = 0.0
@@ -122,6 +144,7 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
             val = w[k]
             f_fiber += val
             
+            # Contribute to direction only if weight is significant
             if val > 1e-5:
                 dir_x += val * bvecs_basis[k, 0]
                 dir_y += val * bvecs_basis[k, 1]
@@ -134,7 +157,7 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
             idx = N_aniso + k
             adc = iso_grid[k]
             val = w[idx]
-            # Use dynamic thresholds passed as arguments
+            # Use dynamic thresholds
             if adc <= th_restricted: f_res += val
             elif adc <= th_hindered: f_hin += val
             else: f_wat += val
@@ -183,12 +206,12 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, reg_lam
                 if r2 > 1: r2 = 1.0
                 out_results[x, y, z, 4] = r2
 
+# --- Main Model Class ---
 class DBSI_FastModel:
     def __init__(self, n_iso_bases=50, reg_lambda=2.0, D_ax=1.5e-3, D_rad=0.3e-3, verbose=True, n_jobs=-1,
-                 # UPDATE 1.3: Updated defaults and configurability 
                  th_restricted=0.3e-3, 
-                 th_hindered=3.0e-3,  # Updated from 2.0e-3
-                 iso_range: Tuple[float, float] = (0.0, 4.0e-3)): # Updated from 3.0e-3
+                 th_hindered=3.0e-3, 
+                 iso_range: Tuple[float, float] = (0.0, 4.0e-3)):
         
         self.n_iso_bases = n_iso_bases
         self.reg_lambda = reg_lambda
@@ -196,7 +219,7 @@ class DBSI_FastModel:
         self.D_rad = D_rad
         self.verbose = verbose
         
-        # New configurable thresholds
+        # Thresholds
         self.th_restricted = float(th_restricted)
         self.th_hindered = float(th_hindered)
         self.iso_range = iso_range
@@ -212,7 +235,7 @@ class DBSI_FastModel:
         # 1. Build Design Matrix
         builder = FastDesignMatrixBuilder(
             n_iso_bases=self.n_iso_bases,
-            iso_range=self.iso_range, # Pass configurable range
+            iso_range=self.iso_range, 
             D_ax=self.D_ax,
             D_rad=self.D_rad
         )
@@ -257,7 +280,7 @@ class DBSI_FastModel:
                 iso_grid.astype(np.float64),
                 basis_dirs,     
                 reg_vec,        
-                self.th_restricted, # Pass configured thresholds to kernel
+                self.th_restricted,
                 self.th_hindered,
                 results_map
             )
