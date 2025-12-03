@@ -82,8 +82,8 @@ def run_hyperparameter_optimization(
     bvals: np.ndarray,
     bvecs: np.ndarray,
     snr: float,
-    bases_grid: List[int] = [15, 25, 50, 75],
-    lambdas_grid: List[float] = [0.05, 0.1, 0.2, 0.4, 0.8],
+    bases_grid: List[int] = [20, 25, 50, 75, 100],
+    lambdas_grid: List[float] = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0],
     n_monte_carlo: int = 500,
     plot: bool = True
 ) -> Dict:
