@@ -10,6 +10,7 @@ dbsi_optimized.egg-info/entry_points.txt
 dbsi_optimized.egg-info/requires.txt
 dbsi_optimized.egg-info/top_level.txt
 dbsi_optimized/calibration/__init__.py
+dbsi_optimized/calibration/optimization.py
 dbsi_optimized/core/__init__.py
 dbsi_optimized/core/design_matrix.py
 dbsi_optimized/core/snr_estimation.py
