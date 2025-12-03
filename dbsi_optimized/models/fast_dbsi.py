@@ -3,7 +3,7 @@
 DBSI Fast Model: Main Production Implementation
 ================================================
 
-Complete DBSI fitting with parallel processing (Numba) and quality control.
+Complete DBSI fitting with parallel processing (Numba) and progress tracking.
 """
 
 import numpy as np
@@ -12,13 +12,13 @@ import os
 import time
 from dataclasses import dataclass
 from numba import njit, prange
+from tqdm import tqdm  # Barra di caricamento
 
 # Import core modules
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
 # --- Constants for Biological Interpretation ---
-# Diffusivity thresholds (micrometers^2 / millisecond)
 TH_RESTRICTED = 0.3e-3  # Upper limit for restricted diffusion (cellularity)
 TH_HINDERED = 2.0e-3    # Upper limit for hindered diffusion (edema/tissue)
 
@@ -94,135 +94,115 @@ class DBSIVolumeResult:
             'pct_converged': float(np.mean(self.r_squared[mask] > 0.5) * 100)
         }
 
-# --- Numba Computational Kernel ---
+# --- Numba Computational Kernel (Batched) ---
 
 @njit(parallel=True, fastmath=True, cache=True)
-def fit_volume_numba(data, mask, AtA, At, bvals, iso_grid, reg_lambda):
+def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, reg_lambda, out_results):
     """
-    High-performance parallel fitting kernel.
+    High-performance parallel fitting kernel for a batch of voxels.
+    Writing directly to the output buffer using coordinates.
     """
-    X, Y, Z, N_vol = data.shape
+    N_batch = coords.shape[0]
+    N_vol = data.shape[3]
     N_aniso = AtA.shape[0] - len(iso_grid)
     N_iso = len(iso_grid)
     
-    # Output buffer: 4 fractions + 1 R_squared
-    # (Fiber, Restricted, Hindered, Water, R2)
-    results = np.zeros((X, Y, Z, 5), dtype=np.float32)
-    
-    # Identify b0 indices for normalization (assumes b < 50 is b0)
-    # Since we can't use lists in njit easily, we do it in the loop or assume pre-norm.
-    # Here we implement robust voxel-wise normalization.
-    
-    for x in prange(X):
-        for y in range(Y):
-            for z in range(Z):
-                if not mask[x, y, z]:
-                    continue
+    # Loop parallelo sui voxel del batch corrente
+    for i in prange(N_batch):
+        x, y, z = coords[i]
+        
+        signal = data[x, y, z, :]
+        
+        # 1. Normalizzazione S0 robusta
+        s0 = 0.0
+        cnt = 0
+        for k in range(len(bvals)):
+            if bvals[k] < 50.0:
+                s0 += signal[k]
+                cnt += 1
+        
+        if cnt > 0:
+            s0 /= cnt
+        else:
+            s0 = signal[0] + 1e-10
+        
+        if s0 <= 1e-6:
+            continue
+            
+        y_norm = signal / s0
+        
+        # 2. Calcolo A.T @ y (Aty)
+        Aty = np.zeros(AtA.shape[0], dtype=np.float64)
+        for r in range(At.shape[0]):
+            val = 0.0
+            for c in range(At.shape[1]):
+                val += At[r, c] * y_norm[c]
+            Aty[r] = val
+        
+        # 3. Risoluzione NNLS Coordinate Descent
+        w = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda)
+        
+        # 4. Parsing Risultati
+        f_fiber = 0.0
+        for k in range(N_aniso):
+            f_fiber += w[k]
+        
+        f_res = 0.0
+        f_hin = 0.0
+        f_wat = 0.0
+        
+        for k in range(N_iso):
+            idx = N_aniso + k
+            adc = iso_grid[k]
+            val = w[idx]
+            
+            if adc <= TH_RESTRICTED:
+                f_res += val
+            elif adc > TH_RESTRICTED and adc <= TH_HINDERED:
+                f_hin += val
+            else:
+                f_wat += val
+        
+        total = f_fiber + f_res + f_hin + f_wat
+        
+        if total > 1e-6:
+            # Scrittura diretta nel buffer globale
+            out_results[x, y, z, 0] = f_fiber / total
+            out_results[x, y, z, 1] = f_res / total
+            out_results[x, y, z, 2] = f_hin / total
+            out_results[x, y, z, 3] = f_wat / total
+            
+            # 5. Calcolo R-Squared Esatto
+            y_mean = 0.0
+            for k in range(N_vol):
+                y_mean += y_norm[k]
+            y_mean /= N_vol
+            
+            tss = 0.0
+            y_dot_y = 0.0
+            for k in range(N_vol):
+                diff = y_norm[k] - y_mean
+                tss += diff * diff
+                y_dot_y += y_norm[k] * y_norm[k]
+            
+            if tss > 1e-10:
+                w_AtA_w = 0.0
+                w_Aty = 0.0
                 
-                signal = data[x, y, z, :]
+                for r in range(len(w)):
+                    w_Aty += w[r] * Aty[r]
+                    row_val = 0.0
+                    for c in range(len(w)):
+                        row_val += AtA[r, c] * w[c]
+                    w_AtA_w += w[r] * row_val
                 
-                # 1. S0 Normalization
-                s0 = 0.0
-                cnt = 0
-                for i in range(len(bvals)):
-                    if bvals[i] < 50.0:
-                        s0 += signal[i]
-                        cnt += 1
+                rss = y_dot_y - 2 * w_Aty + w_AtA_w
                 
-                if cnt > 0:
-                    s0 /= cnt
-                else:
-                    s0 = signal[0] + 1e-10
+                r2 = 1.0 - (rss / tss)
+                if r2 < 0: r2 = 0.0
+                if r2 > 1: r2 = 1.0
                 
-                if s0 <= 1e-6:
-                    continue
-                    
-                y_norm = signal / s0
-                
-                # 2. Compute A.T @ y (Aty)
-                # Manual dot product for max speed in registers
-                Aty = np.zeros(AtA.shape[0], dtype=np.float64)
-                for i in range(At.shape[0]):
-                    val = 0.0
-                    for j in range(At.shape[1]):
-                        val += At[i, j] * y_norm[j]
-                    Aty[i] = val
-                
-                # 3. Solve NNLS: min ||Ax - y||^2 + lambda||x||^2
-                w = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda)
-                
-                # 4. Parse Results (Compartmentalization)
-                # Anisotropic (Fiber)
-                f_fiber = 0.0
-                for i in range(N_aniso):
-                    f_fiber += w[i]
-                
-                # Isotropic (Spectrum)
-                f_res = 0.0
-                f_hin = 0.0
-                f_wat = 0.0
-                
-                for k in range(N_iso):
-                    idx = N_aniso + k
-                    adc = iso_grid[k]
-                    val = w[idx]
-                    
-                    if adc <= TH_RESTRICTED:
-                        f_res += val
-                    elif adc > TH_RESTRICTED and adc <= TH_HINDERED:
-                        f_hin += val
-                    else:
-                        f_wat += val
-                
-                total = f_fiber + f_res + f_hin + f_wat
-                
-                if total > 1e-6:
-                    results[x, y, z, 0] = f_fiber / total
-                    results[x, y, z, 1] = f_res / total
-                    results[x, y, z, 2] = f_hin / total
-                    results[x, y, z, 3] = f_wat / total
-                    
-                    # 5. Calculate Exact R-Squared
-                    # TSS = sum((y - mean(y))^2)
-                    # RSS = ||Ax - y||^2 = w.T @ AtA @ w - 2 * w.T @ Aty + y.T @ y
-                    # Note: We use the UN-normalized weights 'w' for reconstruction
-                    
-                    y_mean = 0.0
-                    for k in range(N_vol):
-                        y_mean += y_norm[k]
-                    y_mean /= N_vol
-                    
-                    tss = 0.0
-                    y_dot_y = 0.0
-                    for k in range(N_vol):
-                        diff = y_norm[k] - y_mean
-                        tss += diff * diff
-                        y_dot_y += y_norm[k] * y_norm[k]
-                    
-                    if tss > 1e-10:
-                        # RSS Calculation using precomputed matrices (O(N_bases^2))
-                        # w_AtA_w = w.T @ (AtA @ w)
-                        w_AtA_w = 0.0
-                        w_Aty = 0.0
-                        
-                        for i in range(len(w)):
-                            w_Aty += w[i] * Aty[i]
-                            # Row-vector product
-                            row_val = 0.0
-                            for j in range(len(w)):
-                                row_val += AtA[i, j] * w[j]
-                            w_AtA_w += w[i] * row_val
-                        
-                        rss = y_dot_y - 2 * w_Aty + w_AtA_w
-                        
-                        r2 = 1.0 - (rss / tss)
-                        # Clip R2 to [0, 1] (numerical noise can cause slight deviations)
-                        if r2 < 0: r2 = 0.0
-                        if r2 > 1: r2 = 1.0
-                        
-                        results[x, y, z, 4] = r2
-
-    return results
+                out_results[x, y, z, 4] = r2
 
 # --- Main Model Class ---
 
@@ -236,11 +216,11 @@ class DBSI_FastModel:
         self.D_ax = D_ax
         self.D_rad = D_rad
         self.verbose = verbose
-        # n_jobs is handled implicitly by Numba OpenMP backend
+        # n_jobs is implicitly handled by Numba
         
     def fit(self, dwi, bvals, bvecs, mask, snr=None):
         """
-        Fits the DBSI model to the provided DWI volume.
+        Fits the DBSI model with progress bar and batch processing.
         """
         if self.verbose:
             print(f"\n{'='*60}")
@@ -257,12 +237,9 @@ class DBSI_FastModel:
             D_ax=self.D_ax,
             D_rad=self.D_rad
         )
-        # Note: Assumes global gradient directions (standard for clinical/preclinical MRI)
         A = builder.build(bvals, bvecs)
         
-        # 2. Pre-compute Gramian (Speed Optimization)
-        # We solve the normal equations: (AtA + lambda*I)x = Aty
-        # Converting to float64 ensures numerical stability during inversion/solving
+        # 2. Pre-compute Gramian
         A_64 = A.astype(np.float64)
         AtA = A_64.T @ A_64
         At = A_64.T
@@ -271,26 +248,50 @@ class DBSI_FastModel:
         
         if self.verbose:
             print(f"Design Matrix: {A.shape} (Condition No: {np.linalg.cond(A):.2e})")
-            print(f"Starting parallel fit on {np.sum(mask):,} voxels...")
-            t0 = time.time()
-            
-        # 3. Parallel Fitting (Numba)
-        # Inputs must be float64 for the solver, but we accept whatever dwi is passed
-        results_map = fit_volume_numba(
-            dwi.astype(np.float64), 
-            mask.astype(bool), 
-            AtA, 
-            At, 
-            bvals.astype(np.float64), 
-            iso_grid.astype(np.float64),
-            float(self.reg_lambda)
-        )
+        
+        # 3. Setup Batch Processing
+        # Estrai coordinate dei voxel in maschera
+        mask_coords = np.argwhere(mask)
+        n_voxels = len(mask_coords)
+        
+        # Buffer risultati (4 frazioni + 1 R2)
+        results_map = np.zeros((dwi.shape[0], dwi.shape[1], dwi.shape[2], 5), dtype=np.float32)
+        
+        # Dimensione batch (bilanciamento tra overhead python e ram)
+        batch_size = 5000 
         
         if self.verbose:
-            dt = time.time() - t0
-            print(f"✓ Fitting completed in {dt:.2f}s ({np.sum(mask)/dt:.0f} voxels/sec)")
+            print(f"Starting fit on {n_voxels:,} voxels...")
+            pbar = tqdm(total=n_voxels, unit="vox", desc="DBSI Fit")
+            t0 = time.time()
+        
+        # 4. Ciclo a Batch
+        for i in range(0, n_voxels, batch_size):
+            # Prendi chunk di coordinate
+            batch_coords = mask_coords[i : i + batch_size]
             
-        # 4. Assemble Results
+            # Chiama Kernel Numba (processa questo chunk in parallelo)
+            # Passiamo dwi completo e le coordinate su cui lavorare
+            fit_batch_numba(
+                dwi.astype(np.float64), 
+                batch_coords,
+                AtA, 
+                At, 
+                bvals.astype(np.float64), 
+                iso_grid.astype(np.float64),
+                float(self.reg_lambda),
+                results_map
+            )
+            
+            if self.verbose:
+                pbar.update(len(batch_coords))
+                
+        if self.verbose:
+            pbar.close()
+            dt = time.time() - t0
+            print(f"✓ Fit completed in {dt:.2f}s ({n_voxels/dt:.0f} voxels/sec)")
+            
+        # 5. Assemble Results
         res = DBSIVolumeResult(dwi.shape[0], dwi.shape[1], dwi.shape[2])
         res.fiber_fraction = results_map[..., 0]
         res.restricted_fraction = results_map[..., 1]
@@ -298,8 +299,6 @@ class DBSI_FastModel:
         res.water_fraction = results_map[..., 3]
         res.r_squared = results_map[..., 4]
         
-        # Assign fixed diffusivities (fast model limitation)
-        # Full DBSI would require a second non-linear optimization step
         res.axial_diffusivity[mask > 0] = self.D_ax
         res.radial_diffusivity[mask > 0] = self.D_rad
         
