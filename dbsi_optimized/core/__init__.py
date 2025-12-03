@@ -1,13 +1,15 @@
+# dbsi_optimized/core/__init__.py
 """
-Core DBSI components: design matrix, SNR estimation, solvers.
+Core DBSI algorithms and data structures.
 """
 
-from .design_matrix import FastDesignMatrixBuilder, solve_nnls_regularized
+from .design_matrix import FastDesignMatrixBuilder
+from .solver import fast_nnls_coordinate_descent
 from .snr_estimation import estimate_snr_robust, estimate_snr_temporal
 
 __all__ = [
     'FastDesignMatrixBuilder',
-    'solve_nnls_regularized',
+    'fast_nnls_coordinate_descent',
     'estimate_snr_robust',
-    'estimate_snr_temporal',
+    'estimate_snr_temporal'
 ]
