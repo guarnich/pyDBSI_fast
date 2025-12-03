@@ -1,0 +1,2 @@
+[console_scripts]
+dbsi-fit = dbsi_optimized.cli:main

@@ -21,7 +21,7 @@ Main Components
 """
 
 __version__ = "1.0.0"
-__author__ = "Your Name"
+__author__ = "Francesco Guarnaccia"
 
 from .models.fast_dbsi import DBSI_FastModel, DBSIResult, DBSIVolumeResult
 from .core.snr_estimation import estimate_snr_robust
