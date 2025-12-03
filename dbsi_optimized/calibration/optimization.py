@@ -13,12 +13,17 @@ def generate_synthetic_volume(
     bvecs: np.ndarray, 
     n_voxels: int, 
     snr: float,
-    physio_params: Optional[Dict] = None
+    physio_params: Optional[Dict] = None,
+    seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Genera un volume sintetico 1D per simulazione Monte Carlo basata su parametri fisiologici.
     Restituisce: (data, ground_truth_restricted_fraction)
     """
+    # Imposta il seed per la riproducibilità se fornito
+    if seed is not None:
+        np.random.seed(seed)
+
     # Parametri di default basati su letteratura (Wang et al. 2011)
     if physio_params is None:
         physio_params = {
@@ -89,17 +94,17 @@ def run_hyperparameter_optimization(
     bases_grid: List[int] = [15, 25, 50, 75],
     lambdas_grid: List[float] = [0.05, 0.1, 0.2, 0.4, 0.8],
     n_monte_carlo: int = 500,
-    plot: bool = True,
     seed: int = 42,
+    plot: bool = True
 ) -> Dict:
     """
-    Esegue una Grid Search Monte Carlo per trovare i parametri ottimali del modello DBSI
-    specifici per il protocollo di acquisizione e l'SNR dei dati.
+    Esegue una Grid Search Monte Carlo per trovare i parametri ottimali del modello DBSI.
     """
     print(f"\n🚀 Avvio Ottimizzazione Iperparametri (SNR: {snr:.1f})...")
     print(f"   Simulazione di {n_monte_carlo} voxel per {len(bases_grid)*len(lambdas_grid)} configurazioni.")
+    print(f"   Seed random: {seed} (Riproducibile)")
 
-    # 1. Generazione Dataset Sintetico (una volta sola per coerenza)
+    # 1. Generazione Dataset Sintetico
     print("   Generazione dataset sintetico...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
         bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
@@ -118,11 +123,10 @@ def run_hyperparameter_optimization(
         for j, reg_lambda in enumerate(lambdas_grid):
             
             # Inizializza modello veloce
-            # verbose=False per non stampare la progress bar interna di tqdm
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=-1, # Usa tutti i core
+                n_jobs=-1,
                 verbose=False
             )
             
@@ -140,7 +144,7 @@ def run_hyperparameter_optimization(
             
             mae_results[i, j] = mae
             
-            # Stampa riga risultati LIVE
+            # Stampa riga risultati
             print(f"{n_bases:<10} | {reg_lambda:<8.2f} | {mae:<12.4f} | {bias:<+10.4f} | {std_dev:<10.4f}")
             
     # 3. Selezione Ottimo
