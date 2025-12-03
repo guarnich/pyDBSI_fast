@@ -10,5 +10,4 @@ __all__ = [
     'solve_nnls_regularized',
     'estimate_snr_robust',
     'estimate_snr_temporal',
-    'estimate_snr_spatial',
 ]
