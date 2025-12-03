@@ -99,6 +99,7 @@ def run_hyperparameter_optimization(
 ) -> Dict:
     """
     Esegue una Grid Search Monte Carlo per trovare i parametri ottimali del modello DBSI.
+    Ottimizza in base a MSE e MAE sulla Restricted Fraction.
     """
     print(f"\n🚀 Avvio Ottimizzazione Iperparametri (SNR: {snr:.1f})...")
     print(f"   Simulazione di {n_monte_carlo} voxel per {len(bases_grid)*len(lambdas_grid)} configurazioni.")
@@ -114,10 +115,11 @@ def run_hyperparameter_optimization(
     
     # 2. Grid Search con output tabellare
     mae_results = np.zeros((len(bases_grid), len(lambdas_grid)))
+    mse_results = np.zeros((len(bases_grid), len(lambdas_grid)))
     
     # Intestazione Tabella
-    print(f"{'Basi Iso':<10} | {'Lambda':<8} | {'MAE (Cell)':<12} | {'Bias':<10} | {'Std Dev':<10}")
-    print("-" * 60)
+    print(f"{'Basi':<6} | {'Lambda':<6} | {'Stima':<8} | {'GT':<8} | {'MAE':<8} | {'MSE':<8} | {'Bias':<8} | {'Std':<8}")
+    print("-" * 75)
     
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
@@ -139,43 +141,51 @@ def run_hyperparameter_optimization(
             # Calcolo metriche
             diff = est_restricted - gt_restricted
             mae = np.mean(np.abs(diff))
+            mse = np.mean(diff**2)
             bias = np.mean(diff)
             std_dev = np.std(diff)
+            avg_est = np.mean(est_restricted)
+            avg_gt = np.mean(gt_restricted)
             
             mae_results[i, j] = mae
+            mse_results[i, j] = mse
             
-            # Stampa riga risultati
-            print(f"{n_bases:<10} | {reg_lambda:<8.2f} | {mae:<12.4f} | {bias:<+10.4f} | {std_dev:<10.4f}")
+            # Stampa riga risultati LIVE
+            print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f} | {bias:<+8.4f} | {std_dev:<8.4f}")
             
     # 3. Selezione Ottimo
-    min_idx = np.unravel_index(np.argmin(mae_results), mae_results.shape)
+    # Scegliamo la combinazione con MSE minore (che penalizza maggiormente gli errori grandi e bilancia Bias/Varianza)
+    min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
     best_bases = bases_grid[min_idx[0]]
     best_lambda = lambdas_grid[min_idx[1]]
+    best_mse = mse_results[min_idx]
     best_mae = mae_results[min_idx]
     
     result = {
         'best_n_bases': best_bases,
         'best_lambda': best_lambda,
+        'min_mse': best_mse,
         'min_mae': best_mae,
-        'full_grid_mae': mae_results,
+        'full_grid_mse': mse_results,
         'grid_bases': bases_grid,
         'grid_lambdas': lambdas_grid
     }
 
-    print("-" * 60)
-    print(f"🏆 Configurazione Ottimale:")
+    print("-" * 75)
+    print(f"🏆 Configurazione Ottimale (Minimo MSE):")
     print(f"   Basi Isotrope: {best_bases}")
     print(f"   Regolarizzazione (Lambda): {best_lambda}")
-    print(f"   Errore Medio Atteso (MAE): {best_mae:.4f}")
+    print(f"   Errore Quadratico Medio (MSE): {best_mse:.6f}")
+    print(f"   Errore Assoluto Medio (MAE): {best_mae:.6f}")
 
-    # 4. Visualizzazione Heatmap
+    # 4. Visualizzazione Heatmap (basata su MSE)
     if plot:
         try:
             import seaborn as sns
             plt.figure(figsize=(10, 6))
-            ax = sns.heatmap(mae_results, annot=True, fmt=".4f", cmap="viridis_r",
+            ax = sns.heatmap(mse_results, annot=True, fmt=".5f", cmap="viridis_r",
                         xticklabels=lambdas_grid, yticklabels=bases_grid)
-            plt.title(f'DBSI Calibration Error (MAE)\nTarget: Restricted Fraction (Inflammation)', fontsize=14)
+            plt.title(f'DBSI Calibration Error (MSE)\nTarget: Restricted Fraction (Inflammation)', fontsize=14)
             plt.xlabel('Regularization Lambda', fontsize=12)
             plt.ylabel('Isotropic Bases Count', fontsize=12)
             
