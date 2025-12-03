@@ -36,17 +36,20 @@ def load_dwi_data(nifti_file: str,
     -------
     dwi, bvals, bvecs, mask, affine
     """
+    # Verifica esistenza file
     for filepath, name in [(nifti_file, "DWI"), (bval_file, "bval"),
                            (bvec_file, "bvec"), (mask_file, "mask")]:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"{name} file not found: {filepath}")
     
+    # Import DIPY
     try:
         from dipy.io.image import load_nifti
         from dipy.io import read_bvals_bvecs
     except ImportError:
         raise ImportError("DIPY not found. Install with: pip install dipy")
     
+    # 1. Caricamento Volume DWI
     if verbose:
         print(f"Loading DWI: {nifti_file}")
     dwi, affine = load_nifti(nifti_file)
@@ -57,13 +60,16 @@ def load_dwi_data(nifti_file: str,
     if verbose:
         print(f"  ✓ Shape: {dwi.shape}")
     
+    # 2. Caricamento Gradienti
     if verbose:
         print(f"Loading gradients: {bval_file}, {bvec_file}")
     bvals, bvecs = read_bvals_bvecs(bval_file, bvec_file)
     
+    # Controllo coerenza dimensioni
     if len(bvals) != dwi.shape[3]:
         raise ValueError(f"B-values count ({len(bvals)}) != DWI volumes ({dwi.shape[3]})")
     
+    # Normalizzazione bvecs
     if bvecs.shape[0] == 3 and bvecs.shape[1] != 3:
         bvecs = bvecs.T
     
@@ -71,10 +77,18 @@ def load_dwi_data(nifti_file: str,
     norms[norms == 0] = 1.0
     bvecs = bvecs / norms
     
+    # --- RIEPILOGO SHELL (Nuova Funzionalità) ---
     if verbose:
-        n_b0 = np.sum(bvals < 50)
-        print(f"  ✓ {len(bvals)} volumes ({n_b0} b0, {len(bvals) - n_b0} DWI)")
+        # Arrotonda i b-values ai 50 più vicini per raggruppare (es. 995 -> 1000)
+        # Questo gestisce piccole fluttuazioni nei dati reali
+        rounded_bvals = np.round(bvals / 50) * 50
+        unique_b, counts = np.unique(rounded_bvals, return_counts=True)
+        
+        print(f"  ✓ Protocol Summary ({len(bvals)} volumes total):")
+        for b_val, count in zip(unique_b, counts):
+            print(f"    - b={int(b_val)}: {count} volumes")
     
+    # 3. Caricamento Maschera
     if verbose:
         print(f"Loading mask: {mask_file}")
     mask, _ = load_nifti(mask_file)
@@ -88,4 +102,3 @@ def load_dwi_data(nifti_file: str,
         print()
     
     return dwi, bvals, bvecs, mask, affine
-
