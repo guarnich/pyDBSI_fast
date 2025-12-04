@@ -7,8 +7,8 @@ Command Line Interface for the High-Performance DBSI Toolbox.
 Features:
 - Automated data loading and protocol validation
 - Robust SNR estimation
-- Automatic Monte Carlo hyperparameter optimization (Default)
-- Fast parallel fitting
+- Automatic Monte Carlo hyperparameter optimization (Smart "Efficient" Selection)
+- Fast parallel fitting with Convergence Monitoring
 - NIfTI output generation
 
 Usage:
@@ -62,8 +62,10 @@ def main():
                           help="Manually specify SNR (skip estimation)")
     group_opt.add_argument("--mc-iter", type=int, default=500, 
                           help="Number of Monte Carlo iterations for calibration")
+    group_opt.add_argument("--batch-size", type=int, default=1000, 
+                          help="Number of voxels to process per batch (Lower to save RAM)")
     
-    # Model Parameters (Used only if --skip-calibration is set)
+    # Model Parameters (Used only if --skip-calibration is set or to override defaults)
     group_model = parser.add_argument_group("Manual Model Parameters")
     group_model.add_argument("--bases", type=int, default=50, 
                             help="Number of isotropic bases (Fallback default)")
@@ -112,6 +114,7 @@ def main():
         print(f"   Targeting SNR: {current_snr:.1f}")
         print(f"   Optimizing for Protocol specificities...")
         
+        # Use our smart optimization logic
         opt_res = run_hyperparameter_optimization(
             bvals, bvecs, 
             snr=current_snr,
@@ -119,12 +122,13 @@ def main():
             plot=False 
         )
         
-        final_bases = opt_res['best_n_bases']
-        final_lambda = opt_res['best_lambda']
+        # Use EFFICIENT parameters (Occam's Razor) instead of absolute best
+        final_bases = opt_res['efficient_n_bases']
+        final_lambda = opt_res['efficient_lambda']
         
         print(f"\n    Calibration Complete:")
-        print(f"      Optimal Bases: {final_bases}")
-        print(f"      Optimal Lambda: {final_lambda}")
+        print(f"      Selected Bases: {final_bases} (Efficient)")
+        print(f"      Selected Lambda: {final_lambda}")
         print(f"      Expected Error (MAE): {opt_res['min_mae']:.4f}")
     else:
         print(f"\n[3/4] Calibration SKIPPED (Using manual defaults)...")
@@ -146,7 +150,8 @@ def main():
     )
     
     t0 = time.time()
-    results = model.fit(dwi, bvals, bvecs, mask)
+    # Pass batch_size to fit method
+    results = model.fit(dwi, bvals, bvecs, mask, batch_size=args.batch_size)
     dt = time.time() - t0
     
     # --- 6. Saving ---
@@ -156,10 +161,11 @@ def main():
     # --- 7. Summary ---
     qc = results.get_quality_summary()
     print(f"\n{'='*60}")
-    print(f"🏁 PIPELINE COMPLETED in {dt:.1f}s")
+    print(f" PIPELINE COMPLETED in {dt:.1f}s")
     print(f"   Quality Control:")
     print(f"   - Mean R²: {qc['mean_r_squared']:.4f}")
-    print(f"   - Convergence: {qc.get('pct_converged', 0):.1f}% voxels")
+    print(f"   - Convergence: {qc['pct_converged']:.1f}% voxels converged")
+    print(f"   - Avg Iterations: {qc['avg_iterations']:.1f}")
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":

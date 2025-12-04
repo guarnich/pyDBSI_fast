@@ -25,39 +25,26 @@ def generate_synthetic_volume(
     """
     Generates a 1D synthetic volume for Monte Carlo simulation based on 
     realistic physiological parameters (Fiber, Restricted, Hindered, Water).
-    
-    Args:
-        bvals: Array of b-values.
-        bvecs: Array of gradient directions.
-        n_voxels: Number of synthetic voxels to generate.
-        snr: Signal-to-Noise Ratio (Rician noise).
-        physio_params: Dictionary of physiological ranges.
-        seed: Random seed for reproducibility.
-        
-    Returns:
-        signals: Synthetic DWI signals (N_voxels, 1, 1, N_meas).
-        gt_restricted: Ground truth restricted fractions (N_voxels,).
     """
-    # Set seed for reproducibility
+    # Set seed for reproducibility of DATA GENERATION (Crucial)
     if seed is not None:
         np.random.seed(seed)
 
-    # Default parameters based on literature (Wang et al. 2011, Cross & Song 2017)
+    # Default parameters based on literature
     if physio_params is None:
         physio_params = {
-            'ad_range': (1.2e-3, 1.9e-3),    # Axial Diffusivity (Healthy WM)
-            'rd_range': (0.2e-3, 0.5e-3),    # Radial Diffusivity
-            'cell_range': (0.0, 0.0003),     # Restricted (Inflammation/Cellularity)
-            'hindered_range': (0.5e-3, 1.5e-3), # Hindered (Edema/Tissue)
-            'water_range': (2.5e-3, 3.5e-3), # Free Water (CSF)
+            'ad_range': (1.2e-3, 1.9e-3),
+            'rd_range': (0.2e-3, 0.5e-3),
+            'cell_range': (0.0, 0.0003),
+            'hindered_range': (0.5e-3, 1.5e-3),
+            'water_range': (2.5e-3, 3.5e-3),
             'f_fiber_mean': 0.45,
-            'f_res_mean': 0.25,              # Pathological scenario (Inflammation)
-            'f_hin_mean': 0.15,              # Hindered fraction
+            'f_res_mean': 0.25,
+            'f_hin_mean': 0.15,
             'f_water_mean': 0.15
         }
 
     n_meas = len(bvals)
-    # Shape compatible with DBSI_FastModel: (X, Y, Z, N_vol) -> (N_vox, 1, 1, N_vol)
     signals = np.zeros((n_voxels, 1, 1, n_meas), dtype=np.float64)
     gt_restricted = np.zeros(n_voxels)
     
@@ -66,23 +53,23 @@ def generate_synthetic_volume(
         d_fiber_ax = np.random.uniform(*physio_params['ad_range'])
         d_fiber_rad = np.random.uniform(*physio_params['rd_range'])
         d_cell = np.random.uniform(*physio_params['cell_range'])
-        d_hin = np.random.uniform(*physio_params['hindered_range']) 
+        d_hin = np.random.uniform(*physio_params['hindered_range'])
         d_water = np.random.uniform(*physio_params['water_range'])
         
-        # Fractions with natural variation
+        # Fractions
         ff = np.random.normal(physio_params['f_fiber_mean'], 0.05)
         fr = np.random.normal(physio_params['f_res_mean'], 0.05)
         fh = np.random.normal(physio_params['f_hin_mean'], 0.05)
         fw = np.random.normal(physio_params['f_water_mean'], 0.05)
         
-        # Clip and renormalization
+        # Normalize
         ff, fr, fh, fw = np.clip([ff, fr, fh, fw], 0, 1)
         total = ff + fr + fh + fw + 1e-10
         ff, fr, fh, fw = ff/total, fr/total, fh/total, fw/total
         
         gt_restricted[i] = fr
         
-        # Random Fiber Orientation (Isotropic on sphere)
+        # Random Orientation
         theta = np.arccos(2 * np.random.random() - 1)
         phi = 2 * np.pi * np.random.random()
         fiber_dir = np.array([
@@ -91,18 +78,18 @@ def generate_synthetic_volume(
             np.cos(theta)
         ])
         
-        # DBSI Signal Generation
+        # Signal Generation
         cos_angle = np.dot(bvecs, fiber_dir)
         d_app = d_fiber_rad + (d_fiber_ax - d_fiber_rad) * (cos_angle**2)
         
         s_fiber = np.exp(-bvals * d_app)
         s_cell = np.exp(-bvals * d_cell)
-        s_hin = np.exp(-bvals * d_hin) # Hindered signal
+        s_hin = np.exp(-bvals * d_hin)
         s_water = np.exp(-bvals * d_water)
         
         sig_noiseless = ff * s_fiber + fr * s_cell + fh * s_hin + fw * s_water
         
-        # Rician Noise generation
+        # Rician Noise
         sigma = 1.0 / snr
         noise_r = np.random.normal(0, sigma, n_meas)
         noise_i = np.random.normal(0, sigma, n_meas)
@@ -134,10 +121,10 @@ def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshol
         improvement = (selected['mse'] - next_model['mse']) / selected['mse']
         
         if improvement > threshold:
-            print(f"   ✅ Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
+            print(f"  Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
             selected = next_model
         else:
-            print(f"   ❌ Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
+            print(f"  Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
             # Don't update 'selected', keep the simpler one
     
     return selected['n'], selected['l']
@@ -150,18 +137,22 @@ def run_hyperparameter_optimization(
     lambdas_grid: List[float] = [0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0], 
     n_monte_carlo: int = 500,
     complexity_threshold: float = 0.03,
+    n_jobs: int = -1, # <--- RESTORED PARALLELISM DEFAULT
     seed: int = 42,
     plot: bool = True
 ) -> Dict:
     """
     Executes a Monte Carlo Grid Search to find optimal DBSI parameters.
-    Uses SERIAL execution (n_jobs=1) to ensure deterministic reproducibility.
+    
+    Args:
+        n_jobs: Number of CPU cores (-1 for all). Use 1 only for strict debugging.
+        complexity_threshold: Min MSE improvement (3%) to justify more bases.
     """
     print(f"\n Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
-    print(f"   Random seed: {seed} (Deterministic Mode)")
-
+    
     # 1. Synthetic Dataset Generation
+    # Always deterministic here
     print("   Generating synthetic dataset...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
         bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
@@ -177,21 +168,24 @@ def run_hyperparameter_optimization(
     print(f"{'Bases':<6} | {'Lambda':<6} | {'Est':<8} | {'GT':<8} | {'MAE':<8} | {'MSE':<8}")
     print("-" * 60)
     
+    start_time = time.time()
+    
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
-            # Initialize fast model in SERIAL MODE (n_jobs=1)
-            # This ensures bitwise reproducibility of the calibration step
+            # Use Parallel Fitting!
+            # The Smart Selection logic handles the tiny noise from parallel sum
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=1,  # <--- FORCE DETERMINISTIC
+                n_jobs=n_jobs,  # <--- FAST MODE
                 verbose=False
             )
             
             res = model.fit(synth_data, bvals, bvecs, mask_synth)
             est_restricted = res.restricted_fraction.flatten()
             
+            # Metrics
             mae = np.mean(np.abs(est_restricted - gt_restricted))
             mse = np.mean((est_restricted - gt_restricted)**2)
             avg_est = np.mean(est_restricted)
@@ -202,6 +196,9 @@ def run_hyperparameter_optimization(
             
             print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f}")
             
+    total_time = time.time() - start_time
+    print(f"\n Optimization finished in {total_time:.2f}s")
+
     # 3. Find Absolute Minimum (Math Optimal)
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
     abs_best_bases = bases_grid[min_idx[0]]
@@ -226,14 +223,13 @@ def run_hyperparameter_optimization(
     }
 
     print("-" * 75)
-    print(f"\n CALIBRATION RESULTS:")
+    print(f"🏆 CALIBRATION RESULTS:")
     print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
     print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
     print(f"      -> Recommended for speed/accuracy balance.")
 
     # 5. Plotting
     if plot:
-        # ... (codice plot esistente) ...
         try:
             import seaborn as sns
             plt.figure(figsize=(10, 6))
@@ -243,11 +239,11 @@ def run_hyperparameter_optimization(
             plt.xlabel('Regularization Lambda', fontsize=12)
             plt.ylabel('Isotropic Bases Count', fontsize=12)
             
-            # Highlight Absolute Best (Red)
             from matplotlib.patches import Rectangle
+            # Red box for Absolute Best
             ax.add_patch(Rectangle((min_idx[1], min_idx[0]), 1, 1, fill=False, edgecolor='red', lw=3, label='Abs. Best'))
             
-            # Highlight Efficient (Green)
+            # Green dashed box for Efficient Choice
             eff_b_idx = bases_grid.index(eff_bases)
             eff_l_idx = lambdas_grid.index(eff_lambda)
             ax.add_patch(Rectangle((eff_l_idx, eff_b_idx), 1, 1, fill=False, edgecolor='#00FF00', lw=3, linestyle='--', label='Efficient'))
@@ -255,6 +251,6 @@ def run_hyperparameter_optimization(
             plt.legend(loc='upper right')
             plt.show()
         except ImportError:
-            print("Install 'seaborn' to visualize the heatmap.")
+            pass
 
     return result
