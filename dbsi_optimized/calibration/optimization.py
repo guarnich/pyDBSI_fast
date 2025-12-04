@@ -102,7 +102,7 @@ def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshol
     Internal Logic: Occam's Razor Selection.
     Selects the configuration that offers the best trade-off between complexity (bases) and error (MSE).
     """
-    print(f"\n🔍 Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
+    print(f"\n Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
     
     # 1. Identify best lambda for each basis count
     candidates = []
@@ -137,7 +137,7 @@ def run_hyperparameter_optimization(
     lambdas_grid: List[float] = [0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0], 
     n_monte_carlo: int = 500,
     complexity_threshold: float = 0.03,
-    n_jobs: int = -1, # <--- RESTORED PARALLELISM DEFAULT
+    n_jobs: int = -1, 
     seed: int = 42,
     plot: bool = True
 ) -> Dict:
@@ -173,12 +173,11 @@ def run_hyperparameter_optimization(
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
-            # Use Parallel Fitting!
-            # The Smart Selection logic handles the tiny noise from parallel sum
+            
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=n_jobs,  # <--- FAST MODE
+                n_jobs=n_jobs,  
                 verbose=False
             )
             
@@ -199,13 +198,12 @@ def run_hyperparameter_optimization(
     total_time = time.time() - start_time
     print(f"\n Optimization finished in {total_time:.2f}s")
 
-    # 3. Find Absolute Minimum (Math Optimal)
+    
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
     abs_best_bases = bases_grid[min_idx[0]]
     abs_best_lambda = lambdas_grid[min_idx[1]]
     abs_best_mse = mse_results[min_idx]
 
-    # 4. Find Efficient Configuration (Smart Optimal)
     eff_bases, eff_lambda = _select_efficient_configuration(
         mse_results, bases_grid, lambdas_grid, complexity_threshold
     )
@@ -223,7 +221,7 @@ def run_hyperparameter_optimization(
     }
 
     print("-" * 75)
-    print(f"🏆 CALIBRATION RESULTS:")
+    print(f"\n CALIBRATION RESULTS:")
     print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
     print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
     print(f"      -> Recommended for speed/accuracy balance.")
