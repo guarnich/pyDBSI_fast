@@ -186,7 +186,7 @@ def run_hyperparameter_optimization(
     }
 
     print("-" * 75)
-    print(f"🏆 CALIBRATION RESULTS:")
+    print(f"\n CALIBRATION RESULTS:")
     print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
     print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
     print(f"      -> Recommended for speed/accuracy balance.")
