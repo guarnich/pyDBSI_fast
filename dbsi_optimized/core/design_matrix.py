@@ -79,7 +79,6 @@ class FastDesignMatrixBuilder:
         self.n_iso_bases = n_iso_bases
         self.n_aniso_bases = n_aniso_bases
         
-        # UPDATE: Profili estesi per coprire demielinizzazione (Report 1.4/4.2)
         if diffusivity_profiles is None:
             self.diff_profiles = np.array([
                 [1.8e-3, 0.3e-3], # 1. Healthy / Fast Axon
@@ -101,12 +100,11 @@ class FastDesignMatrixBuilder:
         norms[norms == 0] = 1e-10
         bvecs_norm = np.ascontiguousarray(bvecs / norms, dtype=np.float64)
         
-        # Cache key includes profiles now
+        
         cache_key = (tuple(bvals), bvecs_norm.tobytes(), self.diff_profiles.tobytes())
         if self._cache_key == cache_key and self._cached_matrix is not None:
             return self._cached_matrix
         
-        # Build Multi-Diffusivity Anisotropic Basis
         A_aniso = build_anisotropic_basis_numba(
             bvals, bvecs_norm, self.basis_dirs, self.diff_profiles
         )

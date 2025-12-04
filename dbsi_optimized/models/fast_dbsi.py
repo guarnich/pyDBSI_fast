@@ -11,23 +11,42 @@ from typing import Tuple, List
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
+@dataclass
+class DBSIResult:
+    f_fiber: float
+    f_restricted: float
+    f_hindered: float
+    f_water: float
+    fiber_dir: np.ndarray
+    D_axial: float
+    D_radial: float
+    r_squared: float
+    converged: bool
+
 class DBSIVolumeResult:
     def __init__(self, X: int, Y: int, Z: int):
         self.shape = (X, Y, Z)
+
+        # Biological Maps
         self.fiber_fraction = np.zeros((X, Y, Z), dtype=np.float32)
         self.restricted_fraction = np.zeros((X, Y, Z), dtype=np.float32)
         self.hindered_fraction = np.zeros((X, Y, Z), dtype=np.float32)
         self.water_fraction = np.zeros((X, Y, Z), dtype=np.float32)
         self.axial_diffusivity = np.zeros((X, Y, Z), dtype=np.float32)
         self.radial_diffusivity = np.zeros((X, Y, Z), dtype=np.float32)
-        self.r_squared = np.zeros((X, Y, Z), dtype=np.float32) # Ora conterrà valori reali
         self.fiber_dir_x = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_y = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_z = np.zeros((X, Y, Z), dtype=np.float32)
+        
+        # Quality Control & Diagnostics Maps
+        self.r_squared = np.zeros((X, Y, Z), dtype=np.float32)
+        self.iterations = np.zeros((X, Y, Z), dtype=np.int16) 
+        self.converged = np.zeros((X, Y, Z), dtype=bool)
 
     def save(self, output_dir: str, affine: np.ndarray = None, prefix: str = 'dbsi'):
         os.makedirs(output_dir, exist_ok=True)
         if affine is None: affine = np.eye(4)
+        
         maps = {
             'fiber_fraction': self.fiber_fraction,
             'restricted_fraction': self.restricted_fraction,
@@ -38,27 +57,40 @@ class DBSIVolumeResult:
             'r_squared': self.r_squared,
             'fiber_dir_x': self.fiber_dir_x,
             'fiber_dir_y': self.fiber_dir_y,
-            'fiber_dir_z': self.fiber_dir_z
+            'fiber_dir_z': self.fiber_dir_z,
+            'iterations': self.iterations,
+            'converged': self.converged
         }
+        
         print(f"Saving maps to {output_dir}...")
         for name, data in maps.items():
-            img = nib.Nifti1Image(data.astype(np.float32), affine)
+            save_type = np.float32
+            if name in ['iterations', 'converged']:
+                save_type = np.int16
+            
+            img = nib.Nifti1Image(data.astype(save_type), affine)
             nib.save(img, os.path.join(output_dir, f'{prefix}_{name}.nii.gz'))
         print(f"✓ Saved {len(maps)} maps.")
 
     def get_quality_summary(self) -> dict:
-        mask = self.r_squared > 0
+        mask = self.r_squared > 0 
         if not np.any(mask): return {'mean_r_squared': 0.0}
-        return {'mean_r_squared': float(np.mean(self.r_squared[mask]))}
+        
+        return {
+            'mean_r_squared': float(np.mean(self.r_squared[mask])),
+            'pct_converged': float(np.mean(self.converged[mask]) * 100),
+            'avg_iterations': float(np.mean(self.iterations[mask]))
+        }
 
 @njit(parallel=True, fastmath=True, cache=True)
 def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
-                    th_restricted, th_hindered, out_results):
+                    th_restricted, th_hindered, out_results, out_diagnostics):
     """
-    Kernel ottimizzato con calcolo esplicito di R^2.
+    Optimized Numba Kernel for DBSI fitting.
+    Calculates: Coefficients, Metrics, R^2, and Convergence stats.
     """
     N_batch = coords.shape[0]
-    N_meas = len(bvals) # Numero di misure
+    N_meas = len(bvals)
     N_dirs = len(bvecs_basis)
     N_profiles = len(diff_profiles)
     N_aniso_total = N_dirs * N_profiles
@@ -69,7 +101,7 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff
         x, y, z = coords[i]
         signal = data[x, y, z, :]
         
-        # 1. Normalization
+        # 1. Normalization (S0)
         s0 = 0.0
         cnt = 0
         for k in range(N_meas):
@@ -80,7 +112,7 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff
         if s0 <= 1e-6: continue
         y_norm = signal / s0
         
-        # 2. A.T @ y
+        # 2. Compute A.T @ y
         Aty = np.zeros(N_bases_total, dtype=np.float64)
         for r in range(N_bases_total):
             val = 0.0
@@ -88,21 +120,25 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff
                 val += At[r, c] * y_norm[c]
             Aty[r] = val
         
-        # 3. Solve (NNLS)
-        w = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
+        # 3. Solve (NNLS) with Diagnostics
+        w, n_iter, final_update = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
         
-        # 4. Calcolo Statistiche (R^2)
-        # Ricostruzione segnale predetto: y_pred = A * w
+        # Save Diagnostics
+        out_diagnostics[x, y, z, 0] = n_iter
+        # We consider converged if update is very small
+        out_diagnostics[x, y, z, 1] = 1.0 if final_update < 1e-6 else 0.0
+        
+        # 4. Calculate R^2 (Goodness of fit)
+        # Reconstruct signal: y_pred = A @ w
         ss_res = 0.0
         ss_tot = 0.0
         y_mean = 0.0
         
-        # Calcolo media y_norm
-        for k in range(N_meas):
-            y_mean += y_norm[k]
+        # Mean of observed data
+        for k in range(N_meas): y_mean += y_norm[k]
         y_mean /= N_meas
         
-        # Calcolo residui
+        # Residual Sum of Squares
         for k in range(N_meas):
             y_pred_k = 0.0
             for b in range(N_bases_total):
@@ -116,34 +152,35 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff
         r_squared = 0.0
         if ss_tot > 1e-10:
             r_squared = 1.0 - (ss_res / ss_tot)
-            if r_squared < 0: r_squared = 0.0 # Clamp per stabilità numerica
+            if r_squared < 0: r_squared = 0.0
         
-        # 5. Parsing Risultati
+        # 5. Parse Biological Metrics
         f_fiber = 0.0
         dir_x, dir_y, dir_z, weight_sum = 0.0, 0.0, 0.0, 0.0
-        
         w_ad_sum = 0.0
         w_rd_sum = 0.0
         
+        # Aggregate Anisotropic Components
         for idx in range(N_aniso_total):
             val = w[idx]
             if val > 1e-6:
                 f_fiber += val
                 
-                # Decode Index
+                # Decode Index to get Direction and Diffusivity Profile
                 profile_idx = idx // N_dirs
                 dir_idx = idx % N_dirs
                 
-                # Direction Avg (Weighted Vector Sum)
+                # Weighted Directions
                 dir_x += val * bvecs_basis[dir_idx, 0]
                 dir_y += val * bvecs_basis[dir_idx, 1]
                 dir_z += val * bvecs_basis[dir_idx, 2]
                 weight_sum += val
                 
-                # Diffusivity Avg
+                # Weighted Diffusivities
                 w_ad_sum += val * diff_profiles[profile_idx, 0]
                 w_rd_sum += val * diff_profiles[profile_idx, 1]
         
+        # Aggregate Isotropic Components
         f_res, f_hin, f_wat = 0.0, 0.0, 0.0
         for k in range(N_iso):
             val = w[N_aniso_total + k]
@@ -155,12 +192,13 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff
         total = f_fiber + f_res + f_hin + f_wat
         
         if total > 1e-6:
+            # Save Fractions
             out_results[x, y, z, 0] = f_fiber / total
             out_results[x, y, z, 1] = f_res / total
             out_results[x, y, z, 2] = f_hin / total
             out_results[x, y, z, 3] = f_wat / total
             
-            # Fiber Metrics
+            # Save Fiber Metrics (Direction & AD/RD)
             if f_fiber > 0.01 and weight_sum > 0:
                 norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
                 if norm > 0:
@@ -179,7 +217,16 @@ class DBSI_FastModel:
                  th_restricted=0.3e-3, th_hindered=3.0e-3, 
                  iso_range: Tuple[float, float] = (0.0, 4.0e-3),
                  diffusivity_profiles: List[Tuple[float, float]] = None):
+        """
+        Initialize DBSI Model with scientifically validated or custom parameters.
         
+        Args:
+            n_iso_bases: Number of basis functions for isotropic spectrum.
+            reg_lambda: Regularization strength.
+            th_restricted: Threshold for restricted diffusion (default 0.3 um^2/ms).
+            th_hindered: Threshold for hindered diffusion (default 3.0 um^2/ms).
+            diffusivity_profiles: List of (AD, RD) tuples for anisotropic dictionary.
+        """
         self.n_iso_bases = n_iso_bases
         self.reg_lambda = reg_lambda
         self.verbose = verbose
@@ -188,12 +235,20 @@ class DBSI_FastModel:
         self.iso_range = iso_range
         self.diffusivity_profiles = diffusivity_profiles
         
-    def fit(self, dwi, bvals, bvecs, mask, snr=None):
+    def fit(self, dwi, bvals, bvecs, mask, batch_size=1000, snr=None):
+        """
+        Fit the DBSI model to the data.
+        
+        Args:
+            batch_size: Number of voxels to process in one parallel block. 
+                        Adjust based on available RAM.
+        """
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f"DBSI High-Performance Fit (Scientifically Optimized)")
+            print(f"DBSI High-Performance Fit")
             print(f"{'='*60}")
         
+        # 1. Build Design Matrix
         builder = FastDesignMatrixBuilder(
             n_iso_bases=self.n_iso_bases,
             iso_range=self.iso_range, 
@@ -201,40 +256,48 @@ class DBSI_FastModel:
         )
         A = builder.build(bvals, bvecs)
         
+        # Get Info & Precomputations
         info = builder.get_basis_info()
         basis_dirs = info['aniso_directions'].astype(np.float64)
         diff_profiles = info['diffusivity_profiles'].astype(np.float64)
         iso_grid = info['iso_diffusivities'].astype(np.float64)
         
-        # Pre-compute Gramian
+        # Create float64 copies for precision in solver
         A_64 = A.astype(np.float64)
         AtA = A_64.T @ A_64
         At = A_64.T
         
+        # Regularization Vector (Split Regularization)
         N_aniso_total = len(basis_dirs) * len(diff_profiles)
         N_total = A.shape[1]
-        
         reg_vec = np.ones(N_total, dtype=np.float64) * self.reg_lambda
+        # Apply reduced regularization to anisotropic fibers to preserve them
         reg_vec[:N_aniso_total] = self.reg_lambda * 0.2 
         
         if self.verbose:
-            print(f"Design Matrix: {A.shape}")
+            print(f"Matrix Size: {A.shape} (Meas x Bases)")
             print(f"Active Profiles: {len(diff_profiles)} (Healthy, Injured, Demyelinated...)")
+            print(f"Batch Size: {batch_size} voxels")
         
+        # 2. Prepare Output Buffers
         mask_coords = np.argwhere(mask)
         n_voxels = len(mask_coords)
-        results_map = np.zeros((dwi.shape[0], dwi.shape[1], dwi.shape[2], 10), dtype=np.float32)
-        batch_size = 1000 
         
+        # 10 channels for results (Fractions, Metrics, R2, Dirs)
+        results_map = np.zeros((dwi.shape[0], dwi.shape[1], dwi.shape[2], 10), dtype=np.float32)
+        # 2 channels for diagnostics (Iterations, Converged)
+        diagnostics_map = np.zeros((dwi.shape[0], dwi.shape[1], dwi.shape[2], 2), dtype=np.float32)
+        
+        # 3. JIT Compilation Warm-up
         if self.verbose: print("Compiling Numba kernel (with R^2 calc)...")
         warmup_coords = mask_coords[0:1] if len(mask_coords) > 0 else np.array([[0,0,0]])
-        # Passiamo A_64 alla funzione
         fit_batch_numba(
             dwi.astype(np.float64), warmup_coords, AtA, At, A_64, bvals.astype(np.float64), 
             iso_grid, basis_dirs, diff_profiles, reg_vec, 
-            self.th_restricted, self.th_hindered, results_map
+            self.th_restricted, self.th_hindered, results_map, diagnostics_map
         )
         
+        # 4. Processing Loop
         if self.verbose:
             pbar = tqdm(total=n_voxels, unit="vox", desc="DBSI Fit")
             
@@ -243,12 +306,13 @@ class DBSI_FastModel:
             fit_batch_numba(
                 dwi.astype(np.float64), batch_coords, AtA, At, A_64, bvals.astype(np.float64), 
                 iso_grid, basis_dirs, diff_profiles, reg_vec, 
-                self.th_restricted, self.th_hindered, results_map
+                self.th_restricted, self.th_hindered, results_map, diagnostics_map
             )
             if self.verbose: pbar.update(len(batch_coords))
                 
         if self.verbose: pbar.close()
             
+        # 5. Package Results
         res = DBSIVolumeResult(dwi.shape[0], dwi.shape[1], dwi.shape[2])
         res.fiber_fraction = results_map[..., 0]
         res.restricted_fraction = results_map[..., 1]
@@ -260,5 +324,8 @@ class DBSI_FastModel:
         res.fiber_dir_z = results_map[..., 7]
         res.axial_diffusivity = results_map[..., 8]
         res.radial_diffusivity = results_map[..., 9]
+        
+        res.iterations = diagnostics_map[..., 0].astype(np.int16)
+        res.converged = diagnostics_map[..., 1].astype(bool)
         
         return res
