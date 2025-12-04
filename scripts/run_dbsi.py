@@ -71,6 +71,10 @@ def main():
                             help="Regularization Lambda (Fallback default)")
     group_model.add_argument("--jobs", type=int, default=-1, 
                             help="Number of CPU cores (-1 = all available)")
+    group_model.add_argument("--th-restricted", type=float, default=0.3e-3,
+                            help="Threshold for restricted diffusion (mm^2/s)")
+    group_model.add_argument("--th-hindered", type=float, default=3.0e-3,
+                            help="Threshold for hindered diffusion (mm^2/s)")
     
     args = parser.parse_args()
     
@@ -138,9 +142,9 @@ def main():
         reg_lambda=final_lambda,
         n_jobs=args.jobs,
         verbose=True,
-        # Parametri scientifici di default (aggiornati secondo le critiche)
-        th_restricted=0.3e-3,
-        th_hindered=3.0e-3,
+        # Usa i parametri da CLI
+        th_restricted=args.th_restricted,
+        th_hindered=args.th_hindered,
         iso_range=(0.0, 4.0e-3)
     )
     
