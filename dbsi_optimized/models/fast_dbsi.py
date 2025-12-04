@@ -235,7 +235,7 @@ class DBSI_FastModel:
         self.iso_range = iso_range
         self.diffusivity_profiles = diffusivity_profiles
         
-    def fit(self, dwi, bvals, bvecs, mask, batch_size=1000, snr=None):
+    def fit(self, dwi, bvals, bvecs, mask, batch_size=2000, snr=None):
         """
         Fit the DBSI model to the data.
         
