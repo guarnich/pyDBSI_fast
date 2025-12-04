@@ -155,29 +155,11 @@ def run_hyperparameter_optimization(
 ) -> Dict:
     """
     Executes a Monte Carlo Grid Search to find optimal DBSI parameters.
-    Includes an automatic "Efficient Selection" step to balance accuracy and speed.
-    
-    Args:
-        bvals: Acquisition b-values.
-        bvecs: Acquisition b-vectors.
-        snr: Estimated SNR of the dataset.
-        bases_grid: List of isotropic basis counts to test.
-        lambdas_grid: List of regularization lambdas to test.
-        n_monte_carlo: Number of synthetic voxels per configuration.
-        complexity_threshold: Minimum MSE improvement required to choose a more complex model (default 3%).
-        seed: Random seed for reproducibility.
-        plot: Whether to plot the results heatmap.
-        
-    Returns:
-        Dictionary containing:
-        - 'best_n_bases', 'best_lambda': Absolute minimum MSE (often high complexity)
-        - 'efficient_n_bases', 'efficient_lambda': Recommended trade-off parameters
-        - 'min_mse', 'min_mae': Error metrics
-        - Full grid results
+    Uses SERIAL execution (n_jobs=1) to ensure deterministic reproducibility.
     """
-    print(f"\n🚀 Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
+    print(f"\n Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
-    print(f"   Random seed: {seed}")
+    print(f"   Random seed: {seed} (Deterministic Mode)")
 
     # 1. Synthetic Dataset Generation
     print("   Generating synthetic dataset...", end="\r")
@@ -198,11 +180,12 @@ def run_hyperparameter_optimization(
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
-            # Initialize fast model (Quiet mode)
+            # Initialize fast model in SERIAL MODE (n_jobs=1)
+            # This ensures bitwise reproducibility of the calibration step
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=-1,
+                n_jobs=1,  # <--- FORCE DETERMINISTIC
                 verbose=False
             )
             
@@ -231,9 +214,9 @@ def run_hyperparameter_optimization(
     )
 
     result = {
-        'best_n_bases': abs_best_bases,        # Absolute math minimum
+        'best_n_bases': abs_best_bases,
         'best_lambda': abs_best_lambda,
-        'efficient_n_bases': eff_bases,        # Smart trade-off (Recommended)
+        'efficient_n_bases': eff_bases,
         'efficient_lambda': eff_lambda,
         'min_mse': abs_best_mse,
         'min_mae': mae_results[min_idx],
@@ -243,13 +226,14 @@ def run_hyperparameter_optimization(
     }
 
     print("-" * 75)
-    print(f"🏆 CALIBRATION RESULTS:")
+    print(f"\n CALIBRATION RESULTS:")
     print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
     print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
     print(f"      -> Recommended for speed/accuracy balance.")
 
     # 5. Plotting
     if plot:
+        # ... (codice plot esistente) ...
         try:
             import seaborn as sns
             plt.figure(figsize=(10, 6))
