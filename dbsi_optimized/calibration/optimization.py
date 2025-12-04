@@ -1,17 +1,9 @@
 # dbsi_optimized/calibration/optimization.py
-"""
-Hyperparameter Optimization Module
-==================================
-Performs Monte Carlo simulations to calibrate DBSI regularization (lambda) 
-and basis count parameters based on protocol-specific SNR and b-values.
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 import time
 
-# Import the fast model
 from ..models.fast_dbsi import DBSI_FastModel
 
 def generate_synthetic_volume(
@@ -22,15 +14,10 @@ def generate_synthetic_volume(
     physio_params: Optional[Dict] = None,
     seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generates a 1D synthetic volume for Monte Carlo simulation based on 
-    realistic physiological parameters (Fiber, Restricted, Hindered, Water).
-    """
-    # Set seed for reproducibility of DATA GENERATION (Crucial)
+    """Generates synthetic DWI data."""
     if seed is not None:
         np.random.seed(seed)
 
-    # Default parameters based on literature
     if physio_params is None:
         physio_params = {
             'ad_range': (1.2e-3, 1.9e-3),
@@ -49,27 +36,23 @@ def generate_synthetic_volume(
     gt_restricted = np.zeros(n_voxels)
     
     for i in range(n_voxels):
-        # Sampling Physiological Parameters
         d_fiber_ax = np.random.uniform(*physio_params['ad_range'])
         d_fiber_rad = np.random.uniform(*physio_params['rd_range'])
         d_cell = np.random.uniform(*physio_params['cell_range'])
         d_hin = np.random.uniform(*physio_params['hindered_range'])
         d_water = np.random.uniform(*physio_params['water_range'])
         
-        # Fractions
         ff = np.random.normal(physio_params['f_fiber_mean'], 0.05)
         fr = np.random.normal(physio_params['f_res_mean'], 0.05)
         fh = np.random.normal(physio_params['f_hin_mean'], 0.05)
         fw = np.random.normal(physio_params['f_water_mean'], 0.05)
         
-        # Normalize
         ff, fr, fh, fw = np.clip([ff, fr, fh, fw], 0, 1)
         total = ff + fr + fh + fw + 1e-10
         ff, fr, fh, fw = ff/total, fr/total, fh/total, fw/total
         
         gt_restricted[i] = fr
         
-        # Random Orientation
         theta = np.arccos(2 * np.random.random() - 1)
         phi = 2 * np.pi * np.random.random()
         fiber_dir = np.array([
@@ -78,7 +61,6 @@ def generate_synthetic_volume(
             np.cos(theta)
         ])
         
-        # Signal Generation
         cos_angle = np.dot(bvecs, fiber_dir)
         d_app = d_fiber_rad + (d_fiber_ax - d_fiber_rad) * (cos_angle**2)
         
@@ -89,7 +71,6 @@ def generate_synthetic_volume(
         
         sig_noiseless = ff * s_fiber + fr * s_cell + fh * s_hin + fw * s_water
         
-        # Rician Noise
         sigma = 1.0 / snr
         noise_r = np.random.normal(0, sigma, n_meas)
         noise_i = np.random.normal(0, sigma, n_meas)
@@ -98,13 +79,9 @@ def generate_synthetic_volume(
     return signals, gt_restricted
 
 def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshold):
-    """
-    Internal Logic: Occam's Razor Selection.
-    Selects the configuration that offers the best trade-off between complexity (bases) and error (MSE).
-    """
-    print(f"\n Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
+    """Occam's Razor Selection."""
+    print(f"\n🔍 Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
     
-    # 1. Identify best lambda for each basis count
     candidates = []
     for i, n_bases in enumerate(bases_grid):
         best_lambda_idx = np.argmin(mse_grid[i, :])
@@ -112,20 +89,17 @@ def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshol
         best_lam = lambdas_grid[best_lambda_idx]
         candidates.append({'n': n_bases, 'l': best_lam, 'mse': min_mse})
 
-    # 2. Iterative comparison starting from simplest model
     selected = candidates[0]
     print(f"   • Baseline: {selected['n']:3d} bases | MSE: {selected['mse']:.6f} (Lambda: {selected['l']})")
 
     for next_model in candidates[1:]:
-        # Calculate relative improvement: (Old_MSE - New_MSE) / Old_MSE
         improvement = (selected['mse'] - next_model['mse']) / selected['mse']
         
         if improvement > threshold:
-            print(f"  Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
+            print(f"   ✅ Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
             selected = next_model
         else:
-            print(f"  Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
-            # Don't update 'selected', keep the simpler one
+            print(f"   ❌ Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
     
     return selected['n'], selected['l']
 
@@ -137,22 +111,15 @@ def run_hyperparameter_optimization(
     lambdas_grid: List[float] = [0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0], 
     n_monte_carlo: int = 500,
     complexity_threshold: float = 0.03,
-    n_jobs: int = -1, 
+    n_jobs: int = -1,
     seed: int = 42,
     plot: bool = True
 ) -> Dict:
-    """
-    Executes a Monte Carlo Grid Search to find optimal DBSI parameters.
-    
-    Args:
-        n_jobs: Number of CPU cores (-1 for all). Use 1 only for strict debugging.
-        complexity_threshold: Min MSE improvement (3%) to justify more bases.
-    """
-    print(f"\n Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
+    """Executes Monte Carlo Grid Search with Efficient Selection."""
+    print(f"\n🚀 Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
     
     # 1. Synthetic Dataset Generation
-    # Always deterministic here
     print("   Generating synthetic dataset...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
         bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
@@ -164,7 +131,6 @@ def run_hyperparameter_optimization(
     mae_results = np.zeros((len(bases_grid), len(lambdas_grid)))
     mse_results = np.zeros((len(bases_grid), len(lambdas_grid)))
     
-    # Table Header
     print(f"{'Bases':<6} | {'Lambda':<6} | {'Est':<8} | {'GT':<8} | {'MAE':<8} | {'MSE':<8}")
     print("-" * 60)
     
@@ -173,18 +139,17 @@ def run_hyperparameter_optimization(
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
             
-            
+            # FAST PARALLEL MODEL (No more n_jobs=1 forcing)
             model = DBSI_FastModel(
                 n_iso_bases=n_bases,
                 reg_lambda=reg_lambda,
-                n_jobs=n_jobs,  
+                n_jobs=n_jobs, 
                 verbose=False
             )
             
             res = model.fit(synth_data, bvals, bvecs, mask_synth)
             est_restricted = res.restricted_fraction.flatten()
             
-            # Metrics
             mae = np.mean(np.abs(est_restricted - gt_restricted))
             mse = np.mean((est_restricted - gt_restricted)**2)
             avg_est = np.mean(est_restricted)
@@ -196,9 +161,9 @@ def run_hyperparameter_optimization(
             print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f}")
             
     total_time = time.time() - start_time
-    print(f"\n Optimization finished in {total_time:.2f}s")
+    print(f"\n   ⏱️ Optimization finished in {total_time:.2f}s")
 
-    
+    # 3. Selections
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
     abs_best_bases = bases_grid[min_idx[0]]
     abs_best_lambda = lambdas_grid[min_idx[1]]
@@ -221,7 +186,7 @@ def run_hyperparameter_optimization(
     }
 
     print("-" * 75)
-    print(f"\n CALIBRATION RESULTS:")
+    print(f"🏆 CALIBRATION RESULTS:")
     print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
     print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
     print(f"      -> Recommended for speed/accuracy balance.")
@@ -238,10 +203,8 @@ def run_hyperparameter_optimization(
             plt.ylabel('Isotropic Bases Count', fontsize=12)
             
             from matplotlib.patches import Rectangle
-            # Red box for Absolute Best
             ax.add_patch(Rectangle((min_idx[1], min_idx[0]), 1, 1, fill=False, edgecolor='red', lw=3, label='Abs. Best'))
             
-            # Green dashed box for Efficient Choice
             eff_b_idx = bases_grid.index(eff_bases)
             eff_l_idx = lambdas_grid.index(eff_lambda)
             ax.add_patch(Rectangle((eff_l_idx, eff_b_idx), 1, 1, fill=False, edgecolor='#00FF00', lw=3, linestyle='--', label='Efficient'))

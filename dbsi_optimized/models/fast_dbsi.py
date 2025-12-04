@@ -67,130 +67,116 @@ class DBSIVolumeResult:
             'avg_iterations': float(np.mean(self.iterations[mask]))
         }
 
-# --- FITTING LOGIC (KERNEL) ---
 
-# FIX: Added @njit decorator here so Numba can compile it!
-@njit(fastmath=True, cache=True)
-def _fit_voxel_logic(x, y, z, data, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
-                     th_restricted, th_hindered, out_results, out_diagnostics):
-    """Shared logic for fitting a single voxel."""
-    signal = data[x, y, z, :]
-    N_meas = len(bvals)
-    N_bases_total = AtA.shape[0]
-    
-    # 1. Normalization
-    s0 = 0.0
-    cnt = 0
-    for k in range(N_meas):
-        if bvals[k] < 50.0: s0 += signal[k]; cnt += 1
-    if cnt > 0: s0 /= cnt
-    else: s0 = signal[0] + 1e-10
-    
-    if s0 <= 1e-6: return # Skip background
-    y_norm = signal / s0
-    
-    # 2. A.T @ y
-    Aty = np.zeros(N_bases_total, dtype=np.float64)
-    for r in range(N_bases_total):
-        val = 0.0
-        for c in range(N_meas):
-            val += At[r, c] * y_norm[c]
-        Aty[r] = val
-    
-    # 3. Solve
-    w, n_iter, final_update = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
-    
-    out_diagnostics[x, y, z, 0] = n_iter
-    out_diagnostics[x, y, z, 1] = 1.0 if final_update < 1e-6 else 0.0
-    
-    # 4. R^2
-    ss_res = 0.0
-    ss_tot = 0.0
-    y_mean = 0.0
-    for k in range(N_meas): y_mean += y_norm[k]
-    y_mean /= N_meas
-    
-    for k in range(N_meas):
-        y_pred_k = 0.0
-        for b in range(N_bases_total):
-            y_pred_k += A[k, b] * w[b]
-        res = y_norm[k] - y_pred_k
-        ss_res += res * res
-        tot = y_norm[k] - y_mean
-        ss_tot += tot * tot
-        
-    r_squared = 0.0
-    if ss_tot > 1e-10:
-        r_squared = 1.0 - (ss_res / ss_tot)
-        if r_squared < 0: r_squared = 0.0
-    out_results[x, y, z, 4] = r_squared
-    
-    # 5. Parse Metrics
-    N_dirs = len(bvecs_basis)
-    N_aniso_total = N_dirs * len(diff_profiles)
-    N_iso = len(iso_grid)
-    
-    f_fiber, dir_x, dir_y, dir_z, weight_sum = 0.0, 0.0, 0.0, 0.0, 0.0
-    w_ad_sum, w_rd_sum = 0.0, 0.0
-    
-    for idx in range(N_aniso_total):
-        val = w[idx]
-        if val > 1e-6:
-            f_fiber += val
-            profile_idx = idx // N_dirs
-            dir_idx = idx % N_dirs
-            dir_x += val * bvecs_basis[dir_idx, 0]
-            dir_y += val * bvecs_basis[dir_idx, 1]
-            dir_z += val * bvecs_basis[dir_idx, 2]
-            weight_sum += val
-            w_ad_sum += val * diff_profiles[profile_idx, 0]
-            w_rd_sum += val * diff_profiles[profile_idx, 1]
-    
-    f_res, f_hin, f_wat = 0.0, 0.0, 0.0
-    for k in range(N_iso):
-        val = w[N_aniso_total + k]
-        adc = iso_grid[k]
-        if adc <= th_restricted: f_res += val
-        elif adc <= th_hindered: f_hin += val
-        else: f_wat += val
-    
-    total = f_fiber + f_res + f_hin + f_wat
-    if total > 1e-6:
-        out_results[x, y, z, 0] = f_fiber / total
-        out_results[x, y, z, 1] = f_res / total
-        out_results[x, y, z, 2] = f_hin / total
-        out_results[x, y, z, 3] = f_wat / total
-        
-        if f_fiber > 0.01 and weight_sum > 0:
-            norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
-            if norm > 0:
-                out_results[x, y, z, 5] = dir_x / norm
-                out_results[x, y, z, 6] = dir_y / norm
-                out_results[x, y, z, 7] = dir_z / norm
-            out_results[x, y, z, 8] = w_ad_sum / weight_sum
-            out_results[x, y, z, 9] = w_rd_sum / weight_sum
-
-# --- PARALLEL KERNEL (Fast, non-deterministic) ---
 @njit(parallel=True, fastmath=True, cache=True)
 def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
                     th_restricted, th_hindered, out_results, out_diagnostics):
+    """
+    Optimized Parallel Kernel for DBSI fitting.
+    """
     N_batch = coords.shape[0]
+    N_meas = len(bvals)
+    N_dirs = len(bvecs_basis)
+    N_profiles = len(diff_profiles)
+    N_aniso_total = N_dirs * N_profiles
+    N_iso = len(iso_grid)
+    N_bases_total = AtA.shape[0]
+    
     for i in prange(N_batch):
         x, y, z = coords[i]
-        _fit_voxel_logic(x, y, z, data, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, 
-                         reg_lambda_vec, th_restricted, th_hindered, out_results, out_diagnostics)
-
-# --- SERIAL KERNEL (Deterministic, for calibration) ---
-@njit(fastmath=True, cache=True)
-def fit_batch_serial(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
-                     th_restricted, th_hindered, out_results, out_diagnostics):
-    N_batch = coords.shape[0]
-    for i in range(N_batch): # Standard range, no prange
-        x, y, z = coords[i]
-        _fit_voxel_logic(x, y, z, data, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, 
-                         reg_lambda_vec, th_restricted, th_hindered, out_results, out_diagnostics)
-
-# --- MAIN MODEL CLASS ---
+        signal = data[x, y, z, :]
+        
+        # 1. Normalization
+        s0 = 0.0
+        cnt = 0
+        for k in range(N_meas):
+            if bvals[k] < 50.0: s0 += signal[k]; cnt += 1
+        if cnt > 0: s0 /= cnt
+        else: s0 = signal[0] + 1e-10
+        
+        if s0 <= 1e-6: continue
+        y_norm = signal / s0
+        
+        # 2. A.T @ y
+        Aty = np.zeros(N_bases_total, dtype=np.float64)
+        for r in range(N_bases_total):
+            val = 0.0
+            for c in range(N_meas):
+                val += At[r, c] * y_norm[c]
+            Aty[r] = val
+        
+        # 3. Solve (NNLS)
+        w, n_iter, final_update = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
+        
+        out_diagnostics[x, y, z, 0] = n_iter
+        out_diagnostics[x, y, z, 1] = 1.0 if final_update < 1e-6 else 0.0
+        
+        # 4. R^2 Calculation
+        ss_res = 0.0
+        ss_tot = 0.0
+        y_mean = 0.0
+        for k in range(N_meas): y_mean += y_norm[k]
+        y_mean /= N_meas
+        
+        for k in range(N_meas):
+            y_pred_k = 0.0
+            for b in range(N_bases_total):
+                y_pred_k += A[k, b] * w[b]
+            res = y_norm[k] - y_pred_k
+            ss_res += res * res
+            tot = y_norm[k] - y_mean
+            ss_tot += tot * tot
+            
+        r_squared = 0.0
+        if ss_tot > 1e-10:
+            r_squared = 1.0 - (ss_res / ss_tot)
+            if r_squared < 0: r_squared = 0.0
+        out_results[x, y, z, 4] = r_squared
+        
+        # 5. Parse Metrics
+        f_fiber = 0.0
+        dir_x, dir_y, dir_z, weight_sum = 0.0, 0.0, 0.0, 0.0
+        w_ad_sum = 0.0
+        w_rd_sum = 0.0
+        
+        for idx in range(N_aniso_total):
+            val = w[idx]
+            if val > 1e-6:
+                f_fiber += val
+                profile_idx = idx // N_dirs
+                dir_idx = idx % N_dirs
+                dir_x += val * bvecs_basis[dir_idx, 0]
+                dir_y += val * bvecs_basis[dir_idx, 1]
+                dir_z += val * bvecs_basis[dir_idx, 2]
+                weight_sum += val
+                w_ad_sum += val * diff_profiles[profile_idx, 0]
+                w_rd_sum += val * diff_profiles[profile_idx, 1]
+        
+        f_res, f_hin, f_wat = 0.0, 0.0, 0.0
+        for k in range(N_iso):
+            val = w[N_aniso_total + k]
+            adc = iso_grid[k]
+            if adc <= th_restricted: f_res += val
+            elif adc <= th_hindered: f_hin += val
+            else: f_wat += val
+        
+        total = f_fiber + f_res + f_hin + f_wat
+        
+        if total > 1e-6:
+            out_results[x, y, z, 0] = f_fiber / total
+            out_results[x, y, z, 1] = f_res / total
+            out_results[x, y, z, 2] = f_hin / total
+            out_results[x, y, z, 3] = f_wat / total
+            
+            if f_fiber > 0.01 and weight_sum > 0:
+                norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
+                if norm > 0:
+                    out_results[x, y, z, 5] = dir_x / norm
+                    out_results[x, y, z, 6] = dir_y / norm
+                    out_results[x, y, z, 7] = dir_z / norm
+                
+                out_results[x, y, z, 8] = w_ad_sum / weight_sum
+                out_results[x, y, z, 9] = w_rd_sum / weight_sum
 
 class DBSI_FastModel:
     def __init__(self, n_iso_bases=50, reg_lambda=2.0, verbose=True, n_jobs=-1,
@@ -208,9 +194,8 @@ class DBSI_FastModel:
         
     def fit(self, dwi, bvals, bvecs, mask, batch_size=1000, snr=None):
         if self.verbose:
-            mode = "Serial (Deterministic)" if self.n_jobs == 1 else "Parallel (Fast)"
             print(f"\n{'='*60}")
-            print(f"DBSI High-Performance Fit [{mode}]")
+            print(f"DBSI High-Performance Fit (Parallel)")
             print(f"{'='*60}")
         
         # 1. Build Matrix
@@ -235,16 +220,10 @@ class DBSI_FastModel:
         reg_vec = np.ones(N_total, dtype=np.float64) * self.reg_lambda
         reg_vec[:N_aniso_total] = self.reg_lambda * 0.2 
         
-        # 2. Select Kernel based on n_jobs
-        if self.n_jobs == 1:
-            fit_kernel = fit_batch_serial
-        else:
-            fit_kernel = fit_batch_numba
-
         if self.verbose:
             print(f"Design Matrix: {A.shape}")
             print(f"Profiles: {len(diff_profiles)}")
-            if self.n_jobs == 1: print("Running in Deterministic Mode (n_jobs=1)")
+            print(f"Batch Size: {batch_size}")
         
         mask_coords = np.argwhere(mask)
         n_voxels = len(mask_coords)
@@ -254,7 +233,7 @@ class DBSI_FastModel:
         
         if self.verbose: print("JIT Compiling kernel...")
         warmup_coords = mask_coords[0:1] if len(mask_coords) > 0 else np.array([[0,0,0]])
-        fit_kernel(
+        fit_batch_numba(
             dwi.astype(np.float64), warmup_coords, AtA, At, A_64, bvals.astype(np.float64), 
             iso_grid, basis_dirs, diff_profiles, reg_vec, 
             self.th_restricted, self.th_hindered, results_map, diagnostics_map
@@ -265,7 +244,7 @@ class DBSI_FastModel:
             
         for i in range(0, n_voxels, batch_size):
             batch_coords = mask_coords[i : i + batch_size]
-            fit_kernel(
+            fit_batch_numba(
                 dwi.astype(np.float64), batch_coords, AtA, At, A_64, bvals.astype(np.float64), 
                 iso_grid, basis_dirs, diff_profiles, reg_vec, 
                 self.th_restricted, self.th_hindered, results_map, diagnostics_map
