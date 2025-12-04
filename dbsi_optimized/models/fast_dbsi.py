@@ -11,19 +11,6 @@ from typing import Tuple, List
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
-# --- Legacy Container ---
-@dataclass
-class DBSIResult:
-    f_fiber: float
-    f_restricted: float
-    f_hindered: float
-    f_water: float
-    fiber_dir: np.ndarray
-    D_axial: float
-    D_radial: float
-    r_squared: float
-    converged: bool
-
 class DBSIVolumeResult:
     def __init__(self, X: int, Y: int, Z: int):
         self.shape = (X, Y, Z)
@@ -33,7 +20,7 @@ class DBSIVolumeResult:
         self.water_fraction = np.zeros((X, Y, Z), dtype=np.float32)
         self.axial_diffusivity = np.zeros((X, Y, Z), dtype=np.float32)
         self.radial_diffusivity = np.zeros((X, Y, Z), dtype=np.float32)
-        self.r_squared = np.zeros((X, Y, Z), dtype=np.float32)
+        self.r_squared = np.zeros((X, Y, Z), dtype=np.float32) # Ora conterrà valori reali
         self.fiber_dir_x = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_y = np.zeros((X, Y, Z), dtype=np.float32)
         self.fiber_dir_z = np.zeros((X, Y, Z), dtype=np.float32)
@@ -65,14 +52,18 @@ class DBSIVolumeResult:
         return {'mean_r_squared': float(np.mean(self.r_squared[mask]))}
 
 @njit(parallel=True, fastmath=True, cache=True)
-def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
+def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
                     th_restricted, th_hindered, out_results):
+    """
+    Kernel ottimizzato con calcolo esplicito di R^2.
+    """
     N_batch = coords.shape[0]
-    N_vol = data.shape[3]
+    N_meas = len(bvals) # Numero di misure
     N_dirs = len(bvecs_basis)
     N_profiles = len(diff_profiles)
     N_aniso_total = N_dirs * N_profiles
     N_iso = len(iso_grid)
+    N_bases_total = AtA.shape[0]
     
     for i in prange(N_batch):
         x, y, z = coords[i]
@@ -81,29 +72,56 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, diff_pr
         # 1. Normalization
         s0 = 0.0
         cnt = 0
-        for k in range(len(bvals)):
+        for k in range(N_meas):
             if bvals[k] < 50.0: s0 += signal[k]; cnt += 1
         if cnt > 0: s0 /= cnt
         else: s0 = signal[0] + 1e-10
+        
         if s0 <= 1e-6: continue
         y_norm = signal / s0
         
         # 2. A.T @ y
-        Aty = np.zeros(AtA.shape[0], dtype=np.float64)
-        for r in range(At.shape[0]):
+        Aty = np.zeros(N_bases_total, dtype=np.float64)
+        for r in range(N_bases_total):
             val = 0.0
-            for c in range(At.shape[1]):
+            for c in range(N_meas):
                 val += At[r, c] * y_norm[c]
             Aty[r] = val
         
-        # 3. Solve
+        # 3. Solve (NNLS)
         w = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
         
-        # 4. Parse Results
+        # 4. Calcolo Statistiche (R^2)
+        # Ricostruzione segnale predetto: y_pred = A * w
+        ss_res = 0.0
+        ss_tot = 0.0
+        y_mean = 0.0
+        
+        # Calcolo media y_norm
+        for k in range(N_meas):
+            y_mean += y_norm[k]
+        y_mean /= N_meas
+        
+        # Calcolo residui
+        for k in range(N_meas):
+            y_pred_k = 0.0
+            for b in range(N_bases_total):
+                y_pred_k += A[k, b] * w[b]
+            
+            res = y_norm[k] - y_pred_k
+            ss_res += res * res
+            tot = y_norm[k] - y_mean
+            ss_tot += tot * tot
+            
+        r_squared = 0.0
+        if ss_tot > 1e-10:
+            r_squared = 1.0 - (ss_res / ss_tot)
+            if r_squared < 0: r_squared = 0.0 # Clamp per stabilità numerica
+        
+        # 5. Parsing Risultati
         f_fiber = 0.0
         dir_x, dir_y, dir_z, weight_sum = 0.0, 0.0, 0.0, 0.0
         
-        # Accumulators for Weighted Diffusivity (Issue 2.1 Fix)
         w_ad_sum = 0.0
         w_rd_sum = 0.0
         
@@ -116,7 +134,7 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, diff_pr
                 profile_idx = idx // N_dirs
                 dir_idx = idx % N_dirs
                 
-                # Direction Avg
+                # Direction Avg (Weighted Vector Sum)
                 dir_x += val * bvecs_basis[dir_idx, 0]
                 dir_y += val * bvecs_basis[dir_idx, 1]
                 dir_z += val * bvecs_basis[dir_idx, 2]
@@ -144,25 +162,22 @@ def fit_batch_numba(data, coords, AtA, At, bvals, iso_grid, bvecs_basis, diff_pr
             
             # Fiber Metrics
             if f_fiber > 0.01 and weight_sum > 0:
-                # Direction
                 norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
                 if norm > 0:
                     out_results[x, y, z, 5] = dir_x / norm
                     out_results[x, y, z, 6] = dir_y / norm
                     out_results[x, y, z, 7] = dir_z / norm
                 
-                # Per-Voxel Diffusivity (Weighted Average of Active Bases)
                 out_results[x, y, z, 8] = w_ad_sum / weight_sum
                 out_results[x, y, z, 9] = w_rd_sum / weight_sum
             
-            # R2 Calculation (Simplified for brevity)
-            out_results[x, y, z, 4] = 1.0 # Exact R2 logic can be copy-pasted if needed
+            # Save R^2
+            out_results[x, y, z, 4] = r_squared
 
 class DBSI_FastModel:
     def __init__(self, n_iso_bases=50, reg_lambda=2.0, verbose=True, n_jobs=-1,
                  th_restricted=0.3e-3, th_hindered=3.0e-3, 
                  iso_range: Tuple[float, float] = (0.0, 4.0e-3),
-                 # New: List of (AD, RD) profiles to optimize over
                  diffusivity_profiles: List[Tuple[float, float]] = None):
         
         self.n_iso_bases = n_iso_bases
@@ -171,18 +186,18 @@ class DBSI_FastModel:
         self.th_restricted = float(th_restricted)
         self.th_hindered = float(th_hindered)
         self.iso_range = iso_range
-        self.diffusivity_profiles = diffusivity_profiles # Passed to builder
+        self.diffusivity_profiles = diffusivity_profiles
         
     def fit(self, dwi, bvals, bvecs, mask, snr=None):
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f"DBSI High-Performance Fit (Multi-Diffusivity)")
+            print(f"DBSI High-Performance Fit (Scientifically Optimized)")
             print(f"{'='*60}")
         
         builder = FastDesignMatrixBuilder(
             n_iso_bases=self.n_iso_bases,
             iso_range=self.iso_range, 
-            diffusivity_profiles=self.diffusivity_profiles # Multi-profile
+            diffusivity_profiles=self.diffusivity_profiles 
         )
         A = builder.build(bvals, bvecs)
         
@@ -204,19 +219,18 @@ class DBSI_FastModel:
         
         if self.verbose:
             print(f"Design Matrix: {A.shape}")
-            print(f"Diffusivity Profiles: {len(diff_profiles)}")
+            print(f"Active Profiles: {len(diff_profiles)} (Healthy, Injured, Demyelinated...)")
         
         mask_coords = np.argwhere(mask)
         n_voxels = len(mask_coords)
-        # Output buffer increased to 10 channels (AD/RD added at 8, 9)
         results_map = np.zeros((dwi.shape[0], dwi.shape[1], dwi.shape[2], 10), dtype=np.float32)
         batch_size = 1000 
         
-        # JIT Warm-up
-        if self.verbose: print("Compiling Numba kernel...")
+        if self.verbose: print("Compiling Numba kernel (with R^2 calc)...")
         warmup_coords = mask_coords[0:1] if len(mask_coords) > 0 else np.array([[0,0,0]])
+        # Passiamo A_64 alla funzione
         fit_batch_numba(
-            dwi.astype(np.float64), warmup_coords, AtA, At, bvals.astype(np.float64), 
+            dwi.astype(np.float64), warmup_coords, AtA, At, A_64, bvals.astype(np.float64), 
             iso_grid, basis_dirs, diff_profiles, reg_vec, 
             self.th_restricted, self.th_hindered, results_map
         )
@@ -227,7 +241,7 @@ class DBSI_FastModel:
         for i in range(0, n_voxels, batch_size):
             batch_coords = mask_coords[i : i + batch_size]
             fit_batch_numba(
-                dwi.astype(np.float64), batch_coords, AtA, At, bvals.astype(np.float64), 
+                dwi.astype(np.float64), batch_coords, AtA, At, A_64, bvals.astype(np.float64), 
                 iso_grid, basis_dirs, diff_profiles, reg_vec, 
                 self.th_restricted, self.th_hindered, results_map
             )
@@ -244,7 +258,6 @@ class DBSI_FastModel:
         res.fiber_dir_x = results_map[..., 5]
         res.fiber_dir_y = results_map[..., 6]
         res.fiber_dir_z = results_map[..., 7]
-        # Now populated from calculation!
         res.axial_diffusivity = results_map[..., 8]
         res.radial_diffusivity = results_map[..., 9]
         

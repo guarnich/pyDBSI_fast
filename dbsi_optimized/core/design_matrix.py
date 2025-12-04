@@ -74,17 +74,18 @@ class FastDesignMatrixBuilder:
                  n_iso_bases: int = 50,
                  n_aniso_bases: int = 150,
                  iso_range: Tuple[float, float] = (0.0, 4.0e-3),
-                 # UPDATE: Supports list of (AD, RD) tuples
                  diffusivity_profiles: List[Tuple[float, float]] = None):
         
         self.n_iso_bases = n_iso_bases
         self.n_aniso_bases = n_aniso_bases
         
-        # Default profiles covering Healthy and Injured axons (Issue 2.1)
+        # UPDATE: Profili estesi per coprire demielinizzazione (Report 1.4/4.2)
         if diffusivity_profiles is None:
             self.diff_profiles = np.array([
-                [1.8e-3, 0.3e-3], # Healthy / Fast
-                [1.0e-3, 0.3e-3]  # Injured / Slow
+                [1.8e-3, 0.3e-3], # 1. Healthy / Fast Axon
+                [1.0e-3, 0.3e-3], # 2. Injured Axon (Axial Damage)
+                [1.8e-3, 0.8e-3], # 3. Demyelinated Axon (Radial Increase)
+                [1.0e-3, 0.8e-3]  # 4. Mixed Injury
             ], dtype=np.float64)
         else:
             self.diff_profiles = np.array(diffusivity_profiles, dtype=np.float64)

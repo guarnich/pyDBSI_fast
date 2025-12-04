@@ -43,7 +43,6 @@ def generate_synthetic_volume(
         np.random.seed(seed)
 
     # Default parameters based on literature (Wang et al. 2011, Cross & Song 2017)
-    # Updated to include Hindered diffusivity
     if physio_params is None:
         physio_params = {
             'ad_range': (1.2e-3, 1.9e-3),    # Axial Diffusivity (Healthy WM)
@@ -67,7 +66,7 @@ def generate_synthetic_volume(
         d_fiber_ax = np.random.uniform(*physio_params['ad_range'])
         d_fiber_rad = np.random.uniform(*physio_params['rd_range'])
         d_cell = np.random.uniform(*physio_params['cell_range'])
-        d_hin = np.random.uniform(*physio_params['hindered_range']) # Hindered
+        d_hin = np.random.uniform(*physio_params['hindered_range']) 
         d_water = np.random.uniform(*physio_params['water_range'])
         
         # Fractions with natural variation
