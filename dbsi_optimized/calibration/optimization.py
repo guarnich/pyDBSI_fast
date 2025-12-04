@@ -80,7 +80,7 @@ def generate_synthetic_volume(
 
 def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshold):
     """Occam's Razor Selection."""
-    print(f"\n🔍 Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
+    print(f"\n Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
     
     candidates = []
     for i, n_bases in enumerate(bases_grid):
@@ -96,10 +96,10 @@ def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshol
         improvement = (selected['mse'] - next_model['mse']) / selected['mse']
         
         if improvement > threshold:
-            print(f"   ✅ Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
+            print(f" Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
             selected = next_model
         else:
-            print(f"   ❌ Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
+            print(f" Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
     
     return selected['n'], selected['l']
 
@@ -116,7 +116,7 @@ def run_hyperparameter_optimization(
     plot: bool = True
 ) -> Dict:
     """Executes Monte Carlo Grid Search with Efficient Selection."""
-    print(f"\n🚀 Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
+    print(f"\n Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
     
     # 1. Synthetic Dataset Generation
@@ -161,7 +161,7 @@ def run_hyperparameter_optimization(
             print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f}")
             
     total_time = time.time() - start_time
-    print(f"\n   ⏱️ Optimization finished in {total_time:.2f}s")
+    print(f"\n Optimization finished in {total_time:.2f}s")
 
     # 3. Selections
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
