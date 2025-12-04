@@ -69,6 +69,8 @@ class DBSIVolumeResult:
 
 # --- FITTING LOGIC (KERNEL) ---
 
+# FIX: Added @njit decorator here so Numba can compile it!
+@njit(fastmath=True, cache=True)
 def _fit_voxel_logic(x, y, z, data, AtA, At, A, bvals, iso_grid, bvecs_basis, diff_profiles, reg_lambda_vec, 
                      th_restricted, th_hindered, out_results, out_diagnostics):
     """Shared logic for fitting a single voxel."""

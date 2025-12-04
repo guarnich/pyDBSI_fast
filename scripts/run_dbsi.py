@@ -80,7 +80,7 @@ def main():
     
     # --- 1. Header ---
     print(f"\n{'='*60}")
-    print(f"🚀 DBSI Optimized Pipeline")
+    print(f" DBSI Optimized Pipeline")
     print(f"{'='*60}")
     
     # --- 2. Data Loading ---
@@ -90,7 +90,7 @@ def main():
             args.dwi, args.bval, args.bvec, args.mask, verbose=True
         )
     except Exception as e:
-        print(f"❌ Error loading data: {e}")
+        print(f" Error loading data: {e}")
         sys.exit(1)
         
     # --- 3. SNR Estimation ---
@@ -112,7 +112,6 @@ def main():
         print(f"   Targeting SNR: {current_snr:.1f}")
         print(f"   Optimizing for Protocol specificities...")
         
-        # Esegui calibrazione (senza plot interattivo per la CLI)
         opt_res = run_hyperparameter_optimization(
             bvals, bvecs, 
             snr=current_snr,
@@ -123,12 +122,12 @@ def main():
         final_bases = opt_res['best_n_bases']
         final_lambda = opt_res['best_lambda']
         
-        print(f"\n   ✅ Calibration Complete:")
+        print(f"\n    Calibration Complete:")
         print(f"      Optimal Bases: {final_bases}")
         print(f"      Optimal Lambda: {final_lambda}")
         print(f"      Expected Error (MAE): {opt_res['min_mae']:.4f}")
     else:
-        print(f"\n[3/4] ⚠️ Calibration SKIPPED (Using manual defaults)...")
+        print(f"\n[3/4] Calibration SKIPPED (Using manual defaults)...")
         print(f"      Bases: {final_bases}")
         print(f"      Lambda: {final_lambda}")
     
@@ -136,13 +135,11 @@ def main():
     print(f"\n[4/4] DBSI Fitting...")
     print(f"   Configuration: Bases={final_bases}, Lambda={final_lambda}")
     
-    # Inizializza Modello con i parametri (calibrati o manuali)
     model = DBSI_FastModel(
         n_iso_bases=final_bases,
         reg_lambda=final_lambda,
         n_jobs=args.jobs,
         verbose=True,
-        # Usa i parametri da CLI
         th_restricted=args.th_restricted,
         th_hindered=args.th_hindered,
         iso_range=(0.0, 4.0e-3)
@@ -153,7 +150,7 @@ def main():
     dt = time.time() - t0
     
     # --- 6. Saving ---
-    print(f"\n💾 Saving results to: {args.out}/")
+    print(f"\n Saving results to: {args.out}/")
     results.save(args.out, affine=affine)
     
     # --- 7. Summary ---
