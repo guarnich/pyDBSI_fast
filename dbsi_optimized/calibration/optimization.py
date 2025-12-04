@@ -111,6 +111,38 @@ def generate_synthetic_volume(
         
     return signals, gt_restricted
 
+def _select_efficient_configuration(mse_grid, bases_grid, lambdas_grid, threshold):
+    """
+    Internal Logic: Occam's Razor Selection.
+    Selects the configuration that offers the best trade-off between complexity (bases) and error (MSE).
+    """
+    print(f"\n🔍 Complexity vs. Accuracy Analysis (Threshold: {threshold*100:.1f}%)")
+    
+    # 1. Identify best lambda for each basis count
+    candidates = []
+    for i, n_bases in enumerate(bases_grid):
+        best_lambda_idx = np.argmin(mse_grid[i, :])
+        min_mse = mse_grid[i, best_lambda_idx]
+        best_lam = lambdas_grid[best_lambda_idx]
+        candidates.append({'n': n_bases, 'l': best_lam, 'mse': min_mse})
+
+    # 2. Iterative comparison starting from simplest model
+    selected = candidates[0]
+    print(f"   • Baseline: {selected['n']:3d} bases | MSE: {selected['mse']:.6f} (Lambda: {selected['l']})")
+
+    for next_model in candidates[1:]:
+        # Calculate relative improvement: (Old_MSE - New_MSE) / Old_MSE
+        improvement = (selected['mse'] - next_model['mse']) / selected['mse']
+        
+        if improvement > threshold:
+            print(f"   ✅ Upgrade:  {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Accepted")
+            selected = next_model
+        else:
+            print(f"   ❌ Ignore:   {next_model['n']:3d} bases | MSE: {next_model['mse']:.6f} (Gain: {improvement*100:5.2f}%) -> Too small")
+            # Don't update 'selected', keep the simpler one
+    
+    return selected['n'], selected['l']
+
 def run_hyperparameter_optimization(
     bvals: np.ndarray,
     bvecs: np.ndarray,
@@ -118,12 +150,13 @@ def run_hyperparameter_optimization(
     bases_grid: List[int] = [25, 50, 75, 100, 125, 150, 175, 200], 
     lambdas_grid: List[float] = [0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0], 
     n_monte_carlo: int = 500,
+    complexity_threshold: float = 0.03,
     seed: int = 42,
     plot: bool = True
 ) -> Dict:
     """
     Executes a Monte Carlo Grid Search to find optimal DBSI parameters.
-    Optimizes based on MSE and MAE of the Restricted Fraction (Inflammation marker).
+    Includes an automatic "Efficient Selection" step to balance accuracy and speed.
     
     Args:
         bvals: Acquisition b-values.
@@ -132,17 +165,22 @@ def run_hyperparameter_optimization(
         bases_grid: List of isotropic basis counts to test.
         lambdas_grid: List of regularization lambdas to test.
         n_monte_carlo: Number of synthetic voxels per configuration.
+        complexity_threshold: Minimum MSE improvement required to choose a more complex model (default 3%).
         seed: Random seed for reproducibility.
         plot: Whether to plot the results heatmap.
         
     Returns:
-        Dictionary containing optimal parameters and full grid results.
+        Dictionary containing:
+        - 'best_n_bases', 'best_lambda': Absolute minimum MSE (often high complexity)
+        - 'efficient_n_bases', 'efficient_lambda': Recommended trade-off parameters
+        - 'min_mse', 'min_mae': Error metrics
+        - Full grid results
     """
     print(f"\n🚀 Starting Hyperparameter Optimization (SNR: {snr:.1f})...")
     print(f"   Simulating {n_monte_carlo} voxels for {len(bases_grid)*len(lambdas_grid)} configurations.")
-    print(f"   Random seed: {seed} (Reproducible)")
+    print(f"   Random seed: {seed}")
 
-    # 1. Synthetic Dataset Generation (Once for consistency)
+    # 1. Synthetic Dataset Generation
     print("   Generating synthetic dataset...", end="\r")
     synth_data, gt_restricted = generate_synthetic_volume(
         bvals, bvecs, n_voxels=n_monte_carlo, snr=snr, seed=seed
@@ -150,13 +188,13 @@ def run_hyperparameter_optimization(
     mask_synth = np.ones((n_monte_carlo, 1, 1), dtype=bool)
     print("   Generating synthetic dataset: COMPLETED.\n")
     
-    # 2. Grid Search with tabular output
+    # 2. Grid Search
     mae_results = np.zeros((len(bases_grid), len(lambdas_grid)))
     mse_results = np.zeros((len(bases_grid), len(lambdas_grid)))
     
     # Table Header
-    print(f"{'Bases':<6} | {'Lambda':<6} | {'Est':<8} | {'GT':<8} | {'MAE':<8} | {'MSE':<8} | {'Bias':<8} | {'Std':<8}")
-    print("-" * 75)
+    print(f"{'Bases':<6} | {'Lambda':<6} | {'Est':<8} | {'GT':<8} | {'MAE':<8} | {'MSE':<8}")
+    print("-" * 60)
     
     for i, n_bases in enumerate(bases_grid):
         for j, reg_lambda in enumerate(lambdas_grid):
@@ -169,67 +207,69 @@ def run_hyperparameter_optimization(
                 verbose=False
             )
             
-            # Fitting
             res = model.fit(synth_data, bvals, bvecs, mask_synth)
-            
-            # Extract Restricted Fraction estimates
             est_restricted = res.restricted_fraction.flatten()
             
-            # Calculate metrics
-            diff = est_restricted - gt_restricted
-            mae = np.mean(np.abs(diff))
-            mse = np.mean(diff**2)
-            bias = np.mean(diff)
-            std_dev = np.std(diff)
+            mae = np.mean(np.abs(est_restricted - gt_restricted))
+            mse = np.mean((est_restricted - gt_restricted)**2)
             avg_est = np.mean(est_restricted)
             avg_gt = np.mean(gt_restricted)
             
             mae_results[i, j] = mae
             mse_results[i, j] = mse
             
-            # Print result row LIVE
-            print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f} | {bias:<+8.4f} | {std_dev:<8.4f}")
+            print(f"{n_bases:<6} | {reg_lambda:<6.2f} | {avg_est:<8.4f} | {avg_gt:<8.4f} | {mae:<8.4f} | {mse:<8.4f}")
             
-    # 3. Select Optimal Configuration
-    # We choose the combination with lowest MSE (Balances Bias and Variance)
+    # 3. Find Absolute Minimum (Math Optimal)
     min_idx = np.unravel_index(np.argmin(mse_results), mse_results.shape)
-    best_bases = bases_grid[min_idx[0]]
-    best_lambda = lambdas_grid[min_idx[1]]
-    best_mse = mse_results[min_idx]
-    best_mae = mae_results[min_idx]
-    
+    abs_best_bases = bases_grid[min_idx[0]]
+    abs_best_lambda = lambdas_grid[min_idx[1]]
+    abs_best_mse = mse_results[min_idx]
+
+    # 4. Find Efficient Configuration (Smart Optimal)
+    eff_bases, eff_lambda = _select_efficient_configuration(
+        mse_results, bases_grid, lambdas_grid, complexity_threshold
+    )
+
     result = {
-        'best_n_bases': best_bases,
-        'best_lambda': best_lambda,
-        'min_mse': best_mse,
-        'min_mae': best_mae,
+        'best_n_bases': abs_best_bases,        # Absolute math minimum
+        'best_lambda': abs_best_lambda,
+        'efficient_n_bases': eff_bases,        # Smart trade-off (Recommended)
+        'efficient_lambda': eff_lambda,
+        'min_mse': abs_best_mse,
+        'min_mae': mae_results[min_idx],
         'full_grid_mse': mse_results,
         'grid_bases': bases_grid,
         'grid_lambdas': lambdas_grid
     }
 
     print("-" * 75)
-    print(f"🏆 Optimal Configuration (Minimum MSE):")
-    print(f"   Isotropic Bases: {best_bases}")
-    print(f"   Regularization (Lambda): {best_lambda}")
-    print(f"   Mean Squared Error (MSE): {best_mse:.6f}")
-    print(f"   Mean Absolute Error (MAE): {best_mae:.6f}")
+    print(f"🏆 CALIBRATION RESULTS:")
+    print(f"   1. Absolute Best (Min Error):  {abs_best_bases} bases, Lambda {abs_best_lambda} (MSE: {abs_best_mse:.6f})")
+    print(f"   2. Efficient Choice (Smart):   {eff_bases} bases, Lambda {eff_lambda}")
+    print(f"      -> Recommended for speed/accuracy balance.")
 
-    # 4. Heatmap Visualization (based on MSE)
+    # 5. Plotting
     if plot:
         try:
             import seaborn as sns
             plt.figure(figsize=(10, 6))
             ax = sns.heatmap(mse_results, annot=True, fmt=".5f", cmap="viridis_r",
                         xticklabels=lambdas_grid, yticklabels=bases_grid)
-            plt.title(f'DBSI Calibration Error (MSE)\nTarget: Restricted Fraction (Inflammation)', fontsize=14)
+            plt.title(f'DBSI Calibration Error (MSE)\nTarget: Restricted Fraction', fontsize=14)
             plt.xlabel('Regularization Lambda', fontsize=12)
             plt.ylabel('Isotropic Bases Count', fontsize=12)
             
-            # Highlight optimal
+            # Highlight Absolute Best (Red)
             from matplotlib.patches import Rectangle
-            ax.add_patch(Rectangle((min_idx[1], min_idx[0]), 1, 1, fill=False, edgecolor='red', lw=3))
+            ax.add_patch(Rectangle((min_idx[1], min_idx[0]), 1, 1, fill=False, edgecolor='red', lw=3, label='Abs. Best'))
             
+            # Highlight Efficient (Green)
+            eff_b_idx = bases_grid.index(eff_bases)
+            eff_l_idx = lambdas_grid.index(eff_lambda)
+            ax.add_patch(Rectangle((eff_l_idx, eff_b_idx), 1, 1, fill=False, edgecolor='#00FF00', lw=3, linestyle='--', label='Efficient'))
+            
+            plt.legend(loc='upper right')
             plt.show()
         except ImportError:
             print("Install 'seaborn' to visualize the heatmap.")
