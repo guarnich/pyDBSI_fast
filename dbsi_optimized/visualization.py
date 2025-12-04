@@ -34,10 +34,15 @@ def plot_design_matrix(
     n_iso_bases : int
         Number of isotropic bases.
     D_ax, D_rad : float
-        Axial and radial diffusivity for anisotropic bases.
+        Axial and radial diffusivity for the single profile visualization.
     """
-    # 1. Build the matrix
-    builder = FastDesignMatrixBuilder(n_iso_bases=n_iso_bases, D_ax=D_ax, D_rad=D_rad)
+    # --- FIX: Use the new API 'diffusivity_profiles' ---
+    builder = FastDesignMatrixBuilder(
+        n_iso_bases=n_iso_bases, 
+        diffusivity_profiles=[(D_ax, D_rad)]
+    )
+    # ---------------------------------------------------
+    
     A = builder.build(bvals, bvecs)
     
     # Calculate Gramian (A^T * A)
@@ -51,8 +56,12 @@ def plot_design_matrix(
     
     # Dimension info
     N_meas, N_bases = A.shape
-    N_aniso = len(bvecs)
+    
+    # We need to know how many anisotropic bases were actually built.
+    # Since we passed 1 profile, N_aniso = number of directions on the sphere (default 150)
+    # We can infer it from the builder or the matrix shape.
     N_iso = n_iso_bases
+    N_aniso = N_bases - N_iso
     
     # --- PLOTTING ---
     fig = plt.figure(figsize=figsize)
@@ -77,7 +86,6 @@ def plot_design_matrix(
     ax1.axvline(x=N_aniso, color='white', linestyle='--', linewidth=1, alpha=0.7)
     
     # Annotations (positioned below x-axis)
-    # Use transformations to position text relative to axes
     trans = ax1.get_xaxis_transform()
     ax1.text(N_aniso/2, -0.05, "Aniso", ha='center', va='top', color='black', fontsize=9, transform=trans)
     ax1.text(N_aniso + N_iso/2, -0.05, "Iso", ha='center', va='top', color='black', fontsize=9, transform=trans)
