@@ -545,7 +545,7 @@ class DBSI_FastModel:
             print(f"DBSI High-Performance Fit v2.1 (Signal Anisotropy Validation)")
             print(f"{'='*60}")
             print(f"Fiber validation:")
-            print(f"  - min_signal_anisotropy: {self.min_signal_anisotropy} (KEY PARAM)")
+            print(f"  - min_signal_anisotropy: {self.min_signal_anisotropy}")
             print(f"  - min_fiber_fa: {self.min_fiber_fa}")
             print(f"  - min_fiber_coherence: {self.min_fiber_coherence}")
         
