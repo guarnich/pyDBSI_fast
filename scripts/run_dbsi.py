@@ -164,8 +164,8 @@ def main():
     print(f" PIPELINE COMPLETED in {dt:.1f}s")
     print(f"   Quality Control:")
     print(f"   - Mean R²: {qc['mean_r_squared']:.4f}")
-    print(f"   - Convergence: {qc['pct_converged']:.1f}% voxels converged")
-    print(f"   - Avg Iterations: {qc['avg_iterations']:.1f}")
+    #print(f"   - Convergence: {qc['pct_converged']:.1f}% voxels converged")
+    #print(f"   - Avg Iterations: {qc['avg_iterations']:.1f}")
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":

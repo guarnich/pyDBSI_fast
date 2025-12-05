@@ -265,7 +265,7 @@ class DBSI_FastModel:
         res.fiber_dir_z = results_map[..., 7]
         res.axial_diffusivity = results_map[..., 8]
         res.radial_diffusivity = results_map[..., 9]
-        res.iterations = diagnostics_map[..., 0].astype(np.int16)
-        res.converged = diagnostics_map[..., 1].astype(bool)
+        #res.iterations = diagnostics_map[..., 0].astype(np.int16)
+        #res.converged = diagnostics_map[..., 1].astype(bool)
         
         return res
