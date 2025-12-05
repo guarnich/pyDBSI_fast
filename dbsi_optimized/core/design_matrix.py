@@ -148,8 +148,7 @@ class FastDesignMatrixBuilder:
         [1.8e-3, 0.5e-3],  # Early demyelination (FA ≈ 0.56)
         [1.8e-3, 0.8e-3],  # Demyelinated axon (FA ≈ 0.43)
         [1.4e-3, 0.6e-3],  # Mixed mild injury (FA ≈ 0.40)
-        [1.0e-3, 0.5e-3],  # Mixed moderate injury (FA ≈ 0.33)
-        [1.0e-3, 0.8e-3],  # Severe mixed injury (FA ≈ 0.11) 
+        [1.0e-3, 0.5e-3]  # Mixed moderate injury (FA ≈ 0.33) 
     ]
     
     def __init__(self,
