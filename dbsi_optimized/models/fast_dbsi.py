@@ -25,6 +25,14 @@ import warnings
 from ..core.design_matrix import FastDesignMatrixBuilder
 from ..core.solver import fast_nnls_coordinate_descent
 
+# Solver configuration defaults
+SOLVER_DEFAULTS = {
+    'tol': 1e-4,           # Relative tolerance (was 1e-6 absolute)
+    'max_iter': 500,       # Max iterations (was 2000)
+    'use_active_set': True,
+    'active_set_start': 10
+}
+
 
 # =============================================================================
 # Quality Control Thresholds
@@ -161,6 +169,10 @@ class DBSIVolumeResult:
         if not np.any(mask):
             return {'error': 'No valid voxels'}
         
+        # Iteration statistics
+        iters = self.iterations[mask]
+        iters = iters[iters > 0]  # Exclude unfitted
+        
         # Basic stats
         summary = {
             'n_voxels': int(np.sum(mask)),
@@ -169,7 +181,11 @@ class DBSIVolumeResult:
             'pct_r2_above_0.8': float(np.mean(self.r_squared[mask] > 0.8) * 100),
             'pct_r2_above_0.9': float(np.mean(self.r_squared[mask] > 0.9) * 100),
             'pct_converged': float(np.mean(self.converged[mask]) * 100),
-            'avg_iterations': float(np.mean(self.iterations[mask])),
+            'avg_iterations': float(np.mean(iters)) if len(iters) > 0 else 0,
+            'median_iterations': float(np.median(iters)) if len(iters) > 0 else 0,
+            'max_iterations': int(np.max(iters)) if len(iters) > 0 else 0,
+            'pct_iter_under_100': float(np.mean(iters < 100) * 100) if len(iters) > 0 else 0,
+            'pct_iter_under_200': float(np.mean(iters < 200) * 100) if len(iters) > 0 else 0,
         }
         
         # Sum constraint stats
@@ -215,6 +231,13 @@ class DBSIVolumeResult:
             f"  % with R² > 0.8:   {summary.get('pct_r2_above_0.8', 0):.1f}%",
             f"  % with R² > 0.9:   {summary.get('pct_r2_above_0.9', 0):.1f}%",
             f"  % Converged:       {summary.get('pct_converged', 0):.1f}%",
+            "",
+            "Solver Iterations:",
+            f"  Mean iterations:   {summary.get('avg_iterations', 0):.1f}",
+            f"  Median iterations: {summary.get('median_iterations', 0):.1f}",
+            f"  Max iterations:    {summary.get('max_iterations', 0)}",
+            f"  % under 100 iter:  {summary.get('pct_iter_under_100', 0):.1f}%",
+            f"  % under 200 iter:  {summary.get('pct_iter_under_200', 0):.1f}%",
             "",
             "Sum Constraint (should be ~1.0):",
             f"  Mean raw sum:      {summary.get('mean_raw_sum', 0):.4f}",
@@ -295,6 +318,7 @@ def _robust_s0_estimation(signal: np.ndarray, bvals: np.ndarray,
 def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis,
                     diff_profiles, reg_lambda_vec, th_restricted, th_hindered,
                     min_fiber_fa, min_fiber_coherence, b0_threshold,
+                    solver_tol, solver_max_iter,
                     out_results, out_diagnostics):
     """
     Optimized Parallel Kernel for DBSI fitting with all corrections.
@@ -348,12 +372,17 @@ def fit_batch_numba(data, coords, AtA, At, A, bvals, iso_grid, bvecs_basis,
             Aty[r] = val
         
         # =================================================================
-        # 3. SOLVE NNLS
+        # 3. SOLVE NNLS (with configurable tolerance and max iterations)
         # =================================================================
-        w, n_iter, final_update = fast_nnls_coordinate_descent(AtA, Aty, reg_lambda_vec)
+        w, n_iter, final_update = fast_nnls_coordinate_descent(
+            AtA, Aty, reg_lambda_vec, 
+            tol=solver_tol, 
+            max_iter=solver_max_iter
+        )
         
         out_diagnostics[x, y, z, 0] = n_iter
-        out_diagnostics[x, y, z, 1] = 1.0 if final_update < 1e-6 else 0.0
+        # Converged if relative update is small OR no changes
+        out_diagnostics[x, y, z, 1] = 1.0 if (final_update < solver_tol or n_iter < solver_max_iter) else 0.0
         
         # =================================================================
         # 4. COMPUTE R²
@@ -511,6 +540,7 @@ class DBSI_FastModel:
     2. **Robust S0**: Median-based normalization resistant to outliers
     3. **QC Monitoring**: Tracks fit quality and constraint violations
     4. **Rician Awareness**: Optional bias correction for low-SNR data
+    5. **Optimized Solver**: Active set NNLS with relative tolerance
     
     Args:
         n_iso_bases: Number of isotropic basis functions (default: 50)
@@ -524,6 +554,10 @@ class DBSI_FastModel:
         min_fiber_fa: Minimum FA for valid fiber component (default: 0.4)
         min_fiber_coherence: Minimum directional coherence (default: 0.3)
         b0_threshold: B-value threshold for b0 detection (default: 50.0)
+        solver_tol: NNLS relative convergence tolerance (default: 1e-4)
+                   Lower = more accurate but slower. 1e-4 is usually sufficient.
+        solver_max_iter: NNLS maximum iterations (default: 500)
+                        Typical convergence is 50-200 iterations.
         
     Example:
         >>> model = DBSI_FastModel(min_fiber_fa=0.4)
@@ -542,7 +576,9 @@ class DBSI_FastModel:
                  diffusivity_profiles: Optional[List[Tuple[float, float]]] = None,
                  min_fiber_fa: float = 0.4,
                  min_fiber_coherence: float = 0.3,
-                 b0_threshold: float = 50.0):
+                 b0_threshold: float = 50.0,
+                 solver_tol: float = 1e-4,
+                 solver_max_iter: int = 500):
         
         self.n_iso_bases = n_iso_bases
         self.reg_lambda = reg_lambda
@@ -555,6 +591,8 @@ class DBSI_FastModel:
         self.min_fiber_fa = float(min_fiber_fa)
         self.min_fiber_coherence = float(min_fiber_coherence)
         self.b0_threshold = float(b0_threshold)
+        self.solver_tol = float(solver_tol)
+        self.solver_max_iter = int(solver_max_iter)
     
     def fit(self, dwi: np.ndarray, bvals: np.ndarray, bvecs: np.ndarray,
             mask: np.ndarray, batch_size: int = 1000,
@@ -631,6 +669,7 @@ class DBSI_FastModel:
                   f"({len(basis_dirs)} dirs × {len(diff_profiles)} profiles)")
             print(f"  - Isotropic: {len(iso_grid)} bases")
             print(f"Regularization: λ_iso={self.reg_lambda}, λ_aniso={self.reg_lambda * 0.2}")
+            print(f"Solver: tol={self.solver_tol}, max_iter={self.solver_max_iter}")
         
         # Get voxel coordinates
         mask_coords = np.argwhere(mask)
@@ -661,6 +700,7 @@ class DBSI_FastModel:
             bvals.astype(np.float64), iso_grid, basis_dirs, diff_profiles,
             reg_vec, self.th_restricted, self.th_hindered,
             self.min_fiber_fa, self.min_fiber_coherence, self.b0_threshold,
+            self.solver_tol, self.solver_max_iter,
             results_map, diagnostics_map
         )
         
@@ -675,6 +715,7 @@ class DBSI_FastModel:
                 bvals.astype(np.float64), iso_grid, basis_dirs, diff_profiles,
                 reg_vec, self.th_restricted, self.th_hindered,
                 self.min_fiber_fa, self.min_fiber_coherence, self.b0_threshold,
+                self.solver_tol, self.solver_max_iter,
                 results_map, diagnostics_map
             )
             if self.verbose:
