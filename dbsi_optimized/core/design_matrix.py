@@ -132,12 +132,12 @@ class FastDesignMatrixBuilder:
         diffusivity_profiles: List of (AD, RD) tuples for fiber profiles [mm²/s]
         min_profile_fa: Minimum FA threshold for diffusivity profiles.
                        Profiles with FA < this value are excluded.
-                       Default: 0.3 (physically motivated for coherent fibers)
+                       Default: 0.4 (physically motivated for coherent fibers)
     
     Example:
-        >>> builder = FastDesignMatrixBuilder(min_profile_fa=0.3)
+        >>> builder = FastDesignMatrixBuilder(min_profile_fa=0.4)
         >>> A = builder.build(bvals, bvecs)
-        >>> # Profiles with FA < 0.3 are automatically excluded
+        >>> # Profiles with FA < 0.4 are automatically excluded
     """
     
     # Default diffusivity profiles representing various fiber states
